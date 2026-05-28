@@ -58,7 +58,10 @@ async def telegram_worker(session):
         try:
             if BOT_TOKEN and CHAT_ID:
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                await session.post(url, json={"chat_id": CHAT_ID, "text": text})
+                async with session.post(url, json={"chat_id": CHAT_ID, "text": text}) as resp:
+                    if resp.status == 429:
+                        await asyncio.sleep(1)
+                        await telegram_queue.put(text)
         except:
             pass
         finally:
@@ -98,7 +101,7 @@ async def fetch_json(session, endpoint, params=None, max_retries=3):
     return None
 
 # ==================================================
-# INDICATORS
+# INDICATORS (değişmedi)
 # ==================================================
 def ema(values, period):
     if len(values) < period:
@@ -231,7 +234,7 @@ def calc_volatility_factor(closes):
     return min(max(factor, 0.7), 1.4)
 
 # ==================================================
-# CLASSIFY (ZIRHLI SİNYAL)
+# CLASSIFY (ZIRHLI SİNYAL EKLENDİ)
 # ==================================================
 def classify_signal(score, vol_factor=1.0, use_floor=True):
     if use_floor:
@@ -302,7 +305,7 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# SCAN (ZAYIF'LARI FİLTRELEYEN, KESİN MESAJ GÖNDEREN)
+# SCAN (ZIRHLI HIBRIT)
 # ==================================================
 async def scan_coin(session, symbol, btc_bias, sem):
     global trading_paused
@@ -398,10 +401,7 @@ async def scan_coin(session, symbol, btc_bias, sem):
 
             best = max(long_score, short_score)
             sig = classify_signal(best, vol_factor, use_floor=True)
-
-            # ❗ ZAYIF sinyalleri Telegram'a gönderme, log'a da yazma
-            if not sig or "ZAYIF" in sig:
-                return
+            if not sig: return
 
             direction = "LONG" if long_score > short_score else "SHORT"
 
@@ -419,18 +419,15 @@ async def scan_coin(session, symbol, btc_bias, sem):
             sl = close_p - atr_val * 1.5 if direction == "LONG" else close_p + atr_val * 1.5
             tp = close_p + atr_val * 2.0 if direction == "LONG" else close_p - atr_val * 2.0
 
-            confidence = min(95, int(best * 6))
-            msg = (f"{sig} {symbol} {direction}\n"
-                   f"Güven: %{confidence}\n"
-                   f"TP:{tp:.4f} SL:{sl:.4f}")
+            msg = f"{sig} {symbol} {direction}\nTP:{tp:.4f} SL:{sl:.4f}\nScore:{best}"
             print(msg)
-            await send_telegram(msg)          # ← Mesaj kesinlikle gider
+            await send_telegram(msg)
 
         except Exception as e:
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST (AYNI)
+# BACKTEST (ZIRHLI HIBRIT)
 # ==================================================
 async def run_backtest(session):
     try:
@@ -511,14 +508,15 @@ async def run_backtest(session):
         logging.error(f"Backtest: {traceback.format_exc()}")
 
 # ==================================================
-# MAIN
+# MAIN (TEMIZ OTURUM)
 # ==================================================
 async def main():
-    print("🚀 KALİTELİ SİNYAL BOTU (Telegram mesajlı)")
+    print("🚀 ZIRHLI PROFESYONEL BOT BAŞLATILDI")
     async with aiohttp.ClientSession() as session:
         worker = asyncio.create_task(telegram_worker(session))
-        await send_telegram("🛡️ KALİTELİ SİNYAL BOTU ONLINE (ZAYIF'lar olmadan)")
+        await send_telegram("🛡️ ZIRHLI PROFESYONEL BOT ONLINE")
 
+        # Bağlantı testi
         if await fetch_json(session, "/fapi/v1/ping") is not None:
             await send_telegram("🌐 Binance bağlantısı başarılı")
         else:
