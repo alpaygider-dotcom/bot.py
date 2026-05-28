@@ -58,10 +58,7 @@ async def telegram_worker(session):
         try:
             if BOT_TOKEN and CHAT_ID:
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                async with session.post(url, json={"chat_id": CHAT_ID, "text": text}) as resp:
-                    if resp.status == 429:
-                        await asyncio.sleep(1)
-                        await telegram_queue.put(text)
+                await session.post(url, json={"chat_id": CHAT_ID, "text": text})
         except:
             pass
         finally:
@@ -234,7 +231,7 @@ def calc_volatility_factor(closes):
     return min(max(factor, 0.7), 1.4)
 
 # ==================================================
-# CLASSIFY (ZIRHLI SİNYAL EKLENDİ)
+# CLASSIFY (ZIRHLI SİNYAL)
 # ==================================================
 def classify_signal(score, vol_factor=1.0, use_floor=True):
     if use_floor:
@@ -305,7 +302,7 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# SCAN (SADECE ORTA VE ÜSTÜ SİNYALLER)
+# SCAN (ZAYIF'LARI FİLTRELEYEN, KESİN MESAJ GÖNDEREN)
 # ==================================================
 async def scan_coin(session, symbol, btc_bias, sem):
     global trading_paused
@@ -401,8 +398,8 @@ async def scan_coin(session, symbol, btc_bias, sem):
 
             best = max(long_score, short_score)
             sig = classify_signal(best, vol_factor, use_floor=True)
-            
-            # Eğer sinyal sınıflandırılamamışsa veya ZAYIF ise gönderme
+
+            # ❗ ZAYIF sinyalleri Telegram'a gönderme, log'a da yazma
             if not sig or "ZAYIF" in sig:
                 return
 
@@ -427,13 +424,13 @@ async def scan_coin(session, symbol, btc_bias, sem):
                    f"Güven: %{confidence}\n"
                    f"TP:{tp:.4f} SL:{sl:.4f}")
             print(msg)
-            await send_telegram(msg)
+            await send_telegram(msg)          # ← Mesaj kesinlikle gider
 
         except Exception as e:
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST (AYNI KALDI)
+# BACKTEST (AYNI)
 # ==================================================
 async def run_backtest(session):
     try:
@@ -514,13 +511,13 @@ async def run_backtest(session):
         logging.error(f"Backtest: {traceback.format_exc()}")
 
 # ==================================================
-# MAIN (TEMIZ OTURUM)
+# MAIN
 # ==================================================
 async def main():
-    print("🚀 KALİTELİ SİNYAL BOTU BAŞLATILDI")
+    print("🚀 KALİTELİ SİNYAL BOTU (Telegram mesajlı)")
     async with aiohttp.ClientSession() as session:
         worker = asyncio.create_task(telegram_worker(session))
-        await send_telegram("🛡️ KALİTELİ SİNYAL BOTU ONLINE (sadece ORTA ve üstü)")
+        await send_telegram("🛡️ KALİTELİ SİNYAL BOTU ONLINE (ZAYIF'lar olmadan)")
 
         if await fetch_json(session, "/fapi/v1/ping") is not None:
             await send_telegram("🌐 Binance bağlantısı başarılı")
