@@ -48,23 +48,26 @@ logging.basicConfig(
 )
 
 # ==================================================
-# TELEGRAM (DÜMDÜZ GÖNDERİM)
+# TELEGRAM GÖNDERİM (HATA AYIKLAMALI)
 # ==================================================
 async def send_telegram_direct(session, text):
-    """Doğrudan Telegram'a mesaj gönderir."""
-    if not BOT_TOKEN or not CHAT_ID:
-        print("❌ BOT_TOKEN veya CHAT_ID eksik!")
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN bulunamadı!")
         return
+    if not CHAT_ID:
+        print("❌ CHAT_ID bulunamadı!")
+        return
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text}
     try:
-        async with session.post(url, json={"chat_id": CHAT_ID, "text": text}) as resp:
+        async with session.post(url, json=payload, timeout=15) as resp:
+            body = await resp.text()
+            print(f"📬 Telegram yanıtı: {resp.status} - {body[:200]}")
             if resp.status != 200:
-                err = await resp.text()
-                print(f"❌ Telegram hatası {resp.status}: {err}")
-            else:
-                print("✅ Telegram'a gönderildi")
+                print(f"❌ Gönderilemedi. Status: {resp.status}")
     except Exception as e:
-        print(f"❌ Telegram bağlantı hatası: {e}")
+        print(f"❌ Telegram istek hatası: {e}")
 
 # ==================================================
 # FETCH (USER-AGENT + RETRY)
@@ -300,7 +303,7 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# SCAN (DOĞRUDAN TELEGRAM'A GÖNDERİR)
+# SCAN (SİNYAL GELİNCE TELEGRAM'A GÖNDERİR)
 # ==================================================
 async def scan_coin(session, symbol, btc_bias, sem):
     global trading_paused
@@ -397,7 +400,6 @@ async def scan_coin(session, symbol, btc_bias, sem):
             best = max(long_score, short_score)
             sig = classify_signal(best, vol_factor, use_floor=True)
 
-            # ZAYIF sinyalleri atla
             if not sig or "ZAYIF" in sig:
                 return
 
@@ -422,17 +424,14 @@ async def scan_coin(session, symbol, btc_bias, sem):
                    f"Güven: %{confidence}\n"
                    f"TP:{tp:.4f} SL:{sl:.4f}")
 
-            # Konsola yaz
             print(msg)
-
-            # Telegram'a doğrudan gönder
             await send_telegram_direct(session, msg)
 
         except Exception as e:
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST (durum mesajları için send_telegram_direct kullanılabilir)
+# BACKTEST
 # ==================================================
 async def run_backtest(session):
     try:
@@ -513,18 +512,33 @@ async def run_backtest(session):
         logging.error(f"Backtest: {traceback.format_exc()}")
 
 # ==================================================
-# MAIN (DÜMDÜZ)
+# MAIN (TEST MESAJI İLE)
 # ==================================================
 async def main():
-    print("🚀 BASİT VE SAĞLAM BOT BAŞLADI")
+    print("🚀 BOT BAŞLATILIYOR (Telegram testiyle)")
+
+    # Token ve chat_id maskesini yazdır (güvenli)
+    if BOT_TOKEN:
+        print(f"BOT_TOKEN: {BOT_TOKEN[:8]}...{BOT_TOKEN[-4:]}")
+    else:
+        print("❌ BOT_TOKEN eksik!")
+    if CHAT_ID:
+        print(f"CHAT_ID: {CHAT_ID}")
+    else:
+        print("❌ CHAT_ID eksik!")
+
     async with aiohttp.ClientSession() as session:
-        # İlk durum mesajı
-        await send_telegram_direct(session, "🛡️ BOT ONLINE (doğrudan mesaj)")
+        # ==== BAĞIMSIZ TEST MESAJI ====
+        print("📤 Test mesajı gönderiliyor...")
+        await send_telegram_direct(session, "🧪 TEST MESAJI - Bot çalışıyor!")
+
+        # Normal durum mesajı
+        await send_telegram_direct(session, "🛡️ BOT ONLINE (test mesajı gönderildi)")
 
         if await fetch_json(session, "/fapi/v1/ping") is not None:
             await send_telegram_direct(session, "🌐 Binance bağlantısı başarılı")
         else:
-            await send_telegram_direct(session, "⚠️ Bağlantı başarısız, denemeye devam edilecek.")
+            await send_telegram_direct(session, "⚠️ Bağlantı başarısız, ancak denemeye devam edilecek.")
 
         syms = await get_all_symbols(session)
         print(f"{len(syms)} coin")
@@ -545,7 +559,6 @@ async def main():
         except asyncio.CancelledError:
             print("Bot kapatılıyor...")
         finally:
-            # session zaten kapanacak
             pass
 
 if __name__ == "__main__":
