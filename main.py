@@ -1,39 +1,3 @@
-import asyncio
-import aiohttp
-import os
-import time
-import logging
-import traceback
-from statistics import mean, stdev
-
-# ==================================================
-# CONFIG
-# ==================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY")
-
-BASE_URL = "https://fapi.binance.com"
-
-SCAN_INTERVAL = 40
-COOLDOWN = 600
-MAX_CONCURRENT_REQUESTS = 20
-
-last_signal = {}
-
-# ==================================================
-# PORTFOLIO & RISK
-# ==================================================
-balance = 1000.0
-equity = 1000.0
-daily_pnl = 0.0
-consecutive_losses = 0
-trading_paused = False
-
-weights = {
-    "trend": 1.0,
-    "volume": 1.0,
-    "breakout": 1.0,
     "whale": 1.0,
     "regime": 1.0
 }
