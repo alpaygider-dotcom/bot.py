@@ -101,7 +101,7 @@ async def fetch_json(session, endpoint, params=None, max_retries=3):
     return None
 
 # ==================================================
-# INDICATORS (değişmedi)
+# INDICATORS
 # ==================================================
 def ema(values, period):
     if len(values) < period:
@@ -401,11 +401,9 @@ async def scan_coin(session, symbol, btc_bias, sem):
 
             best = max(long_score, short_score)
             sig = classify_signal(best, vol_factor, use_floor=True)
-            if not sig:
-                return
-
-            # ❗ Sadece ORTA ve üstü sinyalleri gönder
-            if "ZAYIF" in sig:
+            
+            # Eğer sinyal sınıflandırılamamışsa veya ZAYIF ise gönderme
+            if not sig or "ZAYIF" in sig:
                 return
 
             direction = "LONG" if long_score > short_score else "SHORT"
@@ -435,7 +433,7 @@ async def scan_coin(session, symbol, btc_bias, sem):
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST (AYNI KALDI, GEÇMİŞ RAPOR İÇİN)
+# BACKTEST (AYNI KALDI)
 # ==================================================
 async def run_backtest(session):
     try:
