@@ -48,34 +48,23 @@ logging.basicConfig(
 )
 
 # ==================================================
-# TELEGRAM QUEUE + DEBUG
+# TELEGRAM (DÜMDÜZ GÖNDERİM)
 # ==================================================
-telegram_queue = asyncio.Queue()
-
-async def telegram_worker(session):
-    while True:
-        text = await telegram_queue.get()
-        print(f"[WORKER] Mesaj alındı: {text[:40]}...")
-        try:
-            if BOT_TOKEN and CHAT_ID:
-                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                async with session.post(url, json={"chat_id": CHAT_ID, "text": text}) as resp:
-                    if resp.status != 200:
-                        err = await resp.text()
-                        print(f"[WORKER] HATA {resp.status}: {err}")
-                    else:
-                        print("[WORKER] Gönderildi.")
+async def send_telegram_direct(session, text):
+    """Doğrudan Telegram'a mesaj gönderir."""
+    if not BOT_TOKEN or not CHAT_ID:
+        print("❌ BOT_TOKEN veya CHAT_ID eksik!")
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    try:
+        async with session.post(url, json={"chat_id": CHAT_ID, "text": text}) as resp:
+            if resp.status != 200:
+                err = await resp.text()
+                print(f"❌ Telegram hatası {resp.status}: {err}")
             else:
-                print("[WORKER] BOT_TOKEN veya CHAT_ID eksik!")
-        except Exception as e:
-            print(f"[WORKER] Exception: {e}")
-        finally:
-            telegram_queue.task_done()
-        await asyncio.sleep(0.35)
-
-async def send_telegram(text):
-    print(f"[QUEUE] Ekleniyor: {text[:40]}...")
-    await telegram_queue.put(text)
+                print("✅ Telegram'a gönderildi")
+    except Exception as e:
+        print(f"❌ Telegram bağlantı hatası: {e}")
 
 # ==================================================
 # FETCH (USER-AGENT + RETRY)
@@ -311,7 +300,7 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# SCAN (DEBUG İLE TELEGRAM'A GÖNDERİR)
+# SCAN (DOĞRUDAN TELEGRAM'A GÖNDERİR)
 # ==================================================
 async def scan_coin(session, symbol, btc_bias, sem):
     global trading_paused
@@ -433,24 +422,26 @@ async def scan_coin(session, symbol, btc_bias, sem):
                    f"Güven: %{confidence}\n"
                    f"TP:{tp:.4f} SL:{sl:.4f}")
 
-            # === DEBUG: mesajı kuyruğa gönder ===
-            print(f"[SCAN] Sinyal bulundu: {msg[:40]}...")
-            await send_telegram(msg)
+            # Konsola yaz
+            print(msg)
+
+            # Telegram'a doğrudan gönder
+            await send_telegram_direct(session, msg)
 
         except Exception as e:
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST (kuyruk ile)
+# BACKTEST (durum mesajları için send_telegram_direct kullanılabilir)
 # ==================================================
 async def run_backtest(session):
     try:
-        await send_telegram("📊 BACKTEST BAŞLADI")
+        await send_telegram_direct(session, "📊 BACKTEST BAŞLADI")
         syms = await get_all_symbols(session)
         if not syms:
-            await send_telegram("❌ Sembol listesi boş!")
+            await send_telegram_direct(session, "❌ Sembol listesi boş!")
             return
-        await send_telegram(f"📋 {len(syms)} sembol bulundu")
+        await send_telegram_direct(session, f"📋 {len(syms)} sembol bulundu")
         test = syms[:200]
         total = wins = 0
         pnl_net = 0.0
@@ -517,24 +508,23 @@ async def run_backtest(session):
         pf = (pnl_net+wins)/(abs(pnl_net)+(total-wins)) if total else 0
         msg = (f"📊 BACKTEST\nSinyal:{total} Kazan:{wins} (%{winrate:.1f})\n"
                f"Ort.PnL:%{avg:.2f} Küm.PnL:%{pnl_net:.2f} PF:{pf:.2f}")
-        await send_telegram(msg)
+        await send_telegram_direct(session, msg)
     except Exception as e:
         logging.error(f"Backtest: {traceback.format_exc()}")
 
 # ==================================================
-# MAIN (DEBUG MODLU)
+# MAIN (DÜMDÜZ)
 # ==================================================
 async def main():
-    print("🚀 DEBUG MODLU BOT BAŞLADI")
+    print("🚀 BASİT VE SAĞLAM BOT BAŞLADI")
     async with aiohttp.ClientSession() as session:
-        worker = asyncio.create_task(telegram_worker(session))
-        await send_telegram("🛡️ DEBUG BOT ONLINE")
+        # İlk durum mesajı
+        await send_telegram_direct(session, "🛡️ BOT ONLINE (doğrudan mesaj)")
 
-        # API testi
         if await fetch_json(session, "/fapi/v1/ping") is not None:
-            await send_telegram("🌐 Binance bağlantısı başarılı")
+            await send_telegram_direct(session, "🌐 Binance bağlantısı başarılı")
         else:
-            await send_telegram("⚠️ Bağlantı başarısız, ancak denemeye devam edilecek.")
+            await send_telegram_direct(session, "⚠️ Bağlantı başarısız, denemeye devam edilecek.")
 
         syms = await get_all_symbols(session)
         print(f"{len(syms)} coin")
@@ -555,8 +545,8 @@ async def main():
         except asyncio.CancelledError:
             print("Bot kapatılıyor...")
         finally:
-            worker.cancel()
-            await worker
+            # session zaten kapanacak
+            pass
 
 if __name__ == "__main__":
     asyncio.run(main())
