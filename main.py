@@ -48,26 +48,28 @@ logging.basicConfig(
 )
 
 # ==================================================
-# TELEGRAM GÖNDERİM (HATA AYIKLAMALI)
+# TELEGRAM QUEUE
 # ==================================================
-async def send_telegram_direct(session, text):
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN bulunamadı!")
-        return
-    if not CHAT_ID:
-        print("❌ CHAT_ID bulunamadı!")
-        return
+telegram_queue = asyncio.Queue()
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
-    try:
-        async with session.post(url, json=payload, timeout=15) as resp:
-            body = await resp.text()
-            print(f"📬 Telegram yanıtı: {resp.status} - {body[:200]}")
-            if resp.status != 200:
-                print(f"❌ Gönderilemedi. Status: {resp.status}")
-    except Exception as e:
-        print(f"❌ Telegram istek hatası: {e}")
+async def telegram_worker(session):
+    while True:
+        text = await telegram_queue.get()
+        try:
+            if BOT_TOKEN and CHAT_ID:
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+                async with session.post(url, json={"chat_id": CHAT_ID, "text": text}) as resp:
+                    if resp.status == 429:
+                        await asyncio.sleep(1)
+                        await telegram_queue.put(text)
+        except:
+            pass
+        finally:
+            telegram_queue.task_done()
+        await asyncio.sleep(0.35)
+
+async def send_telegram(text):
+    await telegram_queue.put(text)
 
 # ==================================================
 # FETCH (USER-AGENT + RETRY)
@@ -232,7 +234,7 @@ def calc_volatility_factor(closes):
     return min(max(factor, 0.7), 1.4)
 
 # ==================================================
-# CLASSIFY (ZIRHLI SİNYAL)
+# CLASSIFY (ZIRHLI SİNYAL EKLENDİ)
 # ==================================================
 def classify_signal(score, vol_factor=1.0, use_floor=True):
     if use_floor:
@@ -303,7 +305,7 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# SCAN (SİNYAL GELİNCE TELEGRAM'A GÖNDERİR)
+# SCAN (SADECE ORTA VE ÜSTÜ SİNYALLER)
 # ==================================================
 async def scan_coin(session, symbol, btc_bias, sem):
     global trading_paused
@@ -399,8 +401,11 @@ async def scan_coin(session, symbol, btc_bias, sem):
 
             best = max(long_score, short_score)
             sig = classify_signal(best, vol_factor, use_floor=True)
+            if not sig:
+                return
 
-            if not sig or "ZAYIF" in sig:
+            # ❗ Sadece ORTA ve üstü sinyalleri gönder
+            if "ZAYIF" in sig:
                 return
 
             direction = "LONG" if long_score > short_score else "SHORT"
@@ -423,24 +428,23 @@ async def scan_coin(session, symbol, btc_bias, sem):
             msg = (f"{sig} {symbol} {direction}\n"
                    f"Güven: %{confidence}\n"
                    f"TP:{tp:.4f} SL:{sl:.4f}")
-
             print(msg)
-            await send_telegram_direct(session, msg)
+            await send_telegram(msg)
 
         except Exception as e:
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST
+# BACKTEST (AYNI KALDI, GEÇMİŞ RAPOR İÇİN)
 # ==================================================
 async def run_backtest(session):
     try:
-        await send_telegram_direct(session, "📊 BACKTEST BAŞLADI")
+        await send_telegram("📊 BACKTEST BAŞLADI")
         syms = await get_all_symbols(session)
         if not syms:
-            await send_telegram_direct(session, "❌ Sembol listesi boş!")
+            await send_telegram("❌ Sembol listesi boş!")
             return
-        await send_telegram_direct(session, f"📋 {len(syms)} sembol bulundu")
+        await send_telegram(f"📋 {len(syms)} sembol bulundu")
         test = syms[:200]
         total = wins = 0
         pnl_net = 0.0
@@ -507,38 +511,23 @@ async def run_backtest(session):
         pf = (pnl_net+wins)/(abs(pnl_net)+(total-wins)) if total else 0
         msg = (f"📊 BACKTEST\nSinyal:{total} Kazan:{wins} (%{winrate:.1f})\n"
                f"Ort.PnL:%{avg:.2f} Küm.PnL:%{pnl_net:.2f} PF:{pf:.2f}")
-        await send_telegram_direct(session, msg)
+        await send_telegram(msg)
     except Exception as e:
         logging.error(f"Backtest: {traceback.format_exc()}")
 
 # ==================================================
-# MAIN (TEST MESAJI İLE)
+# MAIN (TEMIZ OTURUM)
 # ==================================================
 async def main():
-    print("🚀 BOT BAŞLATILIYOR (Telegram testiyle)")
-
-    # Token ve chat_id maskesini yazdır (güvenli)
-    if BOT_TOKEN:
-        print(f"BOT_TOKEN: {BOT_TOKEN[:8]}...{BOT_TOKEN[-4:]}")
-    else:
-        print("❌ BOT_TOKEN eksik!")
-    if CHAT_ID:
-        print(f"CHAT_ID: {CHAT_ID}")
-    else:
-        print("❌ CHAT_ID eksik!")
-
+    print("🚀 KALİTELİ SİNYAL BOTU BAŞLATILDI")
     async with aiohttp.ClientSession() as session:
-        # ==== BAĞIMSIZ TEST MESAJI ====
-        print("📤 Test mesajı gönderiliyor...")
-        await send_telegram_direct(session, "🧪 TEST MESAJI - Bot çalışıyor!")
-
-        # Normal durum mesajı
-        await send_telegram_direct(session, "🛡️ BOT ONLINE (test mesajı gönderildi)")
+        worker = asyncio.create_task(telegram_worker(session))
+        await send_telegram("🛡️ KALİTELİ SİNYAL BOTU ONLINE (sadece ORTA ve üstü)")
 
         if await fetch_json(session, "/fapi/v1/ping") is not None:
-            await send_telegram_direct(session, "🌐 Binance bağlantısı başarılı")
+            await send_telegram("🌐 Binance bağlantısı başarılı")
         else:
-            await send_telegram_direct(session, "⚠️ Bağlantı başarısız, ancak denemeye devam edilecek.")
+            await send_telegram("⚠️ Bağlantı başarısız, ancak denemeye devam edilecek.")
 
         syms = await get_all_symbols(session)
         print(f"{len(syms)} coin")
@@ -559,7 +548,8 @@ async def main():
         except asyncio.CancelledError:
             print("Bot kapatılıyor...")
         finally:
-            pass
+            worker.cancel()
+            await worker
 
 if __name__ == "__main__":
     asyncio.run(main())
