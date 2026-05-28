@@ -234,28 +234,25 @@ def calc_volatility_factor(closes):
     return min(max(factor, 0.7), 1.4)
 
 # ==================================================
-# CLASSIFY (ZIRHLI SİNYAL EKLENDİ)
+# CLASSIFY (SADECE GÜÇLÜ VE ZIRHLI)
 # ==================================================
-def classify_signal(score, vol_factor=1.0, use_floor=True):
+def classify_signal(score, vol_factor=1.0, use_floor=False):
+    """use_floor artık False: minimum sınır yok, sadece vol_factor'e göre hesaplar."""
     if use_floor:
-        armored = max(15 * vol_factor, 12)
         strong = max(13 * vol_factor, 10)
         medium = max(8 * vol_factor, 6)
         weak = max(5 * vol_factor, 4)
     else:
-        armored = 15 * vol_factor
         strong = 13 * vol_factor
         medium = 8 * vol_factor
-        weak = 5 * vol_factor
+        # weak zaten kullanılmıyor
 
-    if score >= armored:
-        return "🛡️ ZIRHLI SİNYAL"
+    # Zırhlı için sabit yüksek eşik (vol_factor'den etkilenmez)
+    if score >= 15:
+        return "🛡️ ZIRHLI"
     if score >= strong:
         return "🔥 GÜÇLÜ"
-    if score >= medium:
-        return "🟡 ORTA"
-    if score >= weak:
-        return "🟢 ZAYIF"
+    # ORTA ve ZAYIF tamamen iptal
     return None
 
 # ==================================================
@@ -305,7 +302,7 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# SCAN (SADECE ORTA VE ÜSTÜ SİNYALLER)
+# SCAN (SADECE GÜÇLÜ VE ÜSTÜ SİNYALLER)
 # ==================================================
 async def scan_coin(session, symbol, btc_bias, sem):
     global trading_paused
@@ -400,12 +397,9 @@ async def scan_coin(session, symbol, btc_bias, sem):
                 if liq_s > liq_l * 1.3: short_score += 2
 
             best = max(long_score, short_score)
-            sig = classify_signal(best, vol_factor, use_floor=True)
+            # use_floor=False ile daha sıkı eşik
+            sig = classify_signal(best, vol_factor, use_floor=False)
             if not sig:
-                return
-
-            # ❗ Sadece ORTA ve üstü sinyalleri gönder
-            if "ZAYIF" in sig:
                 return
 
             direction = "LONG" if long_score > short_score else "SHORT"
@@ -519,10 +513,10 @@ async def run_backtest(session):
 # MAIN (TEMIZ OTURUM)
 # ==================================================
 async def main():
-    print("🚀 KALİTELİ SİNYAL BOTU BAŞLATILDI")
+    print("🚀 SADECE GÜÇLÜ SİNYAL BOTU BAŞLATILDI")
     async with aiohttp.ClientSession() as session:
         worker = asyncio.create_task(telegram_worker(session))
-        await send_telegram("🛡️ KALİTELİ SİNYAL BOTU ONLINE (sadece ORTA ve üstü)")
+        await send_telegram("✅ GÜÇLÜ/ZIRHLI SİNYAL BOTU AKTİF")
 
         if await fetch_json(session, "/fapi/v1/ping") is not None:
             await send_telegram("🌐 Binance bağlantısı başarılı")
