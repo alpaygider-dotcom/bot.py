@@ -1,6 +1,34 @@
-    "whale": 1.0,
-    "regime": 1.0
-}
+import asyncio
+import aiohttp
+import os
+import time
+import logging
+import traceback
+from statistics import mean, stdev
+
+# ==================================================
+# CONFIG
+# ==================================================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY")
+
+BASE_URL = "https://fapi.binance.com"
+
+SCAN_INTERVAL = 40
+COOLDOWN = 600
+MAX_CONCURRENT_REQUESTS = 20
+
+last_signal = {}
+
+# ==================================================
+# PORTFOLIO & RISK (opsiyonel)
+# ==================================================
+balance = 1000.0
+equity = 1000.0
+daily_pnl = 0.0
+consecutive_losses = 0
+trading_paused = False
 
 # ==================================================
 # LOGGING
@@ -65,11 +93,10 @@ async def fetch_json(session, endpoint, params=None, max_retries=3):
     return None
 
 # ==================================================
-# INDICATORS (değişmedi)
+# INDICATORS (düzeltildi)
 # ==================================================
 def ema(values, period):
-    if len(values) < period:
-        return None
+    if len(values) < period: return None
     m = 2 / (period + 1)
     e = mean(values[:period])
     for x in values[period:]:
@@ -77,24 +104,18 @@ def ema(values, period):
     return e
 
 def atr(highs, lows, closes, period=14):
-    if len(highs) < period + 1:
-        return None
-    tr = []
-    for i in range(1, len(highs)):
-        tr.append(max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])))
-    return mean(tr[-period:])
+    if len(highs) < period + 1: return None
+    tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(highs))]
+    return mean(tr[-period:]) if len(tr) >= period else None
 
 def detect_regime(closes, volumes):
     move = (closes[-1] - closes[0]) / closes[0]
     vm = mean(volumes)
     vs = stdev(volumes) if len(volumes) > 1 else 0
     vz = (volumes[-1] - vm) / vs if vs > 0 else 0
-    score = 0
-    if abs(move) > 0.01: score += 1
-    if abs(move) > 0.02: score += 1
-    if vz > 1: score += 1
-    if score >= 2: return "TREND"
-    if abs(move) < 0.003: return "RANGE"
+    # rejim sadece bilgi amaçlı, ayrıca çift taraflı puan vermeyecek
+    if abs(move) > 0.012 and vz > 1: return "TREND"
+    if abs(move) < 0.004: return "RANGE"
     return "MIXED"
 
 def detect_sweep(highs, lows, closes):
@@ -106,151 +127,32 @@ def detect_sweep(highs, lows, closes):
 
 def sideways_breakout(closes, atr_val=None):
     recent = closes[-15:]
-    highest = max(recent)
-    lowest = min(recent)
-    range_pct = ((highest - lowest) / lowest) * 100
+    highest, lowest = max(recent), min(recent)
+    range_pct = (highest - lowest) / lowest * 100
     factor = max((atr_val / highest) * 2, 0.001) if (atr_val and highest > 0) else 0.002
     up = closes[-1] > highest * (1 - factor)
     down = closes[-1] < lowest * (1 + factor)
     return range_pct < 2.5, up, down
 
-def orderflow_strength(volume, taker_buy, hist_tb=None, hist_vol=None):
-    if volume <= 0:
-        return 0, 0
-    ratio = taker_buy / volume
-    delta = (taker_buy - (volume - taker_buy)) / volume
+def orderflow_strength(volume, taker_buy):
+    if volume <= 0: return 0
+    r = taker_buy / volume
+    d = (taker_buy - (volume - taker_buy)) / volume
     score = 0
-    if ratio > 0.62: score += 2
-    if ratio < 0.38: score -= 2
-    if delta > 0.18: score += 2
-    if delta < -0.18: score -= 2
-
-    cvd_trend = 0
-    if hist_tb and hist_vol and len(hist_tb) >= 5:
-        cvd_vals = []
-        cvd = 0
-        for tb, vol in zip(hist_tb[-10:], hist_vol[-10:]):
-            cvd += tb - (vol - tb) if vol > 0 else 0
-            cvd_vals.append(cvd)
-        if len(cvd_vals) >= 5:
-            x = list(range(5))
-            y = cvd_vals[-5:]
-            n = 5
-            sx = sum(x); sy = sum(y)
-            sxy = sum(x[i]*y[i] for i in range(5))
-            sx2 = sum(i*i for i in x)
-            denom = n*sx2 - sx*sx
-            slope = (n*sxy - sx*sy) / denom if denom != 0 else 0
-            cvd_trend = 1 if slope > 0 else -1 if slope < 0 else 0
-            if cvd_trend > 0: score += 2
-            elif cvd_trend < 0: score -= 2
-    return score, cvd_trend
+    if r > 0.62: score += 1
+    if r < 0.38: score -= 1
+    if d > 0.18: score += 1
+    if d < -0.18: score -= 1
+    return score
 
 # ==================================================
-# EXTERNAL DATA
-# ==================================================
-async def get_heavy_data(session, symbol):
-    funding = 0.0; oi_change = 0.0; ls = 1.0
-    f = await fetch_json(session, "/fapi/v1/premiumIndex", {"symbol": symbol})
-    if f: funding = float(f.get("lastFundingRate", 0))
-    oi = await fetch_json(session, "/futures/data/openInterestHist",
-                          {"symbol": symbol, "period": "5m", "limit": 2})
-    if oi and len(oi) >= 2:
-        prev = float(oi[-2]["sumOpenInterest"])
-        curr = float(oi[-1]["sumOpenInterest"])
-        if prev > 0: oi_change = (curr - prev) / prev * 100
-    r = await fetch_json(session, "/futures/data/topLongShortPositionRatio",
-                         {"symbol": symbol, "period": "5m", "limit": 1})
-    if r:
-        try: ls = float(r[-1]["longShortRatio"])
-        except: pass
-    return funding, oi_change, ls
-
-async def get_liquidation_data(session, symbol):
-    if not COINGLASS_API_KEY: return None, None
-    try:
-        headers = {"coinglassSecret": COINGLASS_API_KEY}
-        params = {"symbol": symbol.replace("USDT",""), "time_type": "1"}
-        async with session.get(
-            "https://open-api.coinglass.com/public/v2/liquidation",
-            params=params, headers=headers, timeout=10
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get("code") == "0":
-                    items = data["data"]["liquidationList"]
-                    long_liq = sum(float(it["longVolUsd"]) for it in items)
-                    short_liq = sum(float(it["shortVolUsd"]) for it in items)
-                    return long_liq, short_liq
-    except:
-        pass
-    return None, None
-
-# ==================================================
-# ADAPTIVE VOLATILITY
-# ==================================================
-def calc_volatility_factor(closes):
-    if len(closes) < 20: return 1.0
-    returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
-    vol = stdev(returns) if len(returns) > 1 else 0
-    base = 0.005
-    factor = vol / base if base > 0 else 1
-    return min(max(factor, 0.7), 1.4)
-
-# ==================================================
-# CLASSIFY (SADECE GÜÇLÜ VE ZIRHLI)
-# ==================================================
-def classify_signal(score, vol_factor=1.0, use_floor=False):
-    """use_floor artık False: minimum sınır yok, sadece vol_factor'e göre hesaplar."""
-    if use_floor:
-        strong = max(13 * vol_factor, 10)
-        medium = max(8 * vol_factor, 6)
-        weak = max(5 * vol_factor, 4)
-    else:
-        strong = 13 * vol_factor
-        medium = 8 * vol_factor
-        # weak zaten kullanılmıyor
-
-    # Zırhlı için sabit yüksek eşik (vol_factor'den etkilenmez)
-    if score >= 15:
-        return "🛡️ ZIRHLI"
-    if score >= strong:
-        return "🔥 GÜÇLÜ"
-    # ORTA ve ZAYIF tamamen iptal
-    return None
-
-# ==================================================
-# RISK ENGINE
-# ==================================================
-def risk_engine(pnl):
-    global equity, daily_pnl, consecutive_losses, trading_paused
-    equity += pnl
-    daily_pnl += pnl
-    if pnl < 0:
-        consecutive_losses += 1
-    else:
-        consecutive_losses = 0
-    if daily_pnl < -80 or equity < balance * 0.85 or consecutive_losses >= 5:
-        trading_paused = True
-
-def evolve(pnl):
-    global weights
-    if pnl > 0:
-        for k in weights: weights[k] *= 1.01
-    else:
-        weights["trend"] *= 0.99
-        weights["whale"] *= 0.99
-    for k in weights:
-        weights[k] = max(0.4, min(weights[k], 2.5))
-
-# ==================================================
-# BTC BIAS
+# BTC BIAS (hafifletildi)
 # ==================================================
 async def get_btc_bias(session):
-    kl = await fetch_json(session, "/fapi/v1/klines", {"symbol":"BTCUSDT","interval":"15m","limit":50})
+    kl = await fetch_json(session, "/fapi/v1/klines", {"symbol": "BTCUSDT", "interval": "15m", "limit": 50})
     if not kl: return "NEUTRAL"
     c = [float(k[4]) for k in kl]
-    e20 = ema(c, 20); e50 = ema(c, 50)
+    e20, e50 = ema(c, 20), ema(c, 50)
     if not e20 or not e50: return "NEUTRAL"
     if c[-1] > e20 > e50: return "BULLISH"
     if c[-1] < e20 < e50: return "BEARISH"
@@ -266,7 +168,17 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# SCAN (SADECE GÜÇLÜ VE ÜSTÜ SİNYALLER)
+# CLASSIFY (sabit ve makul)
+# ==================================================
+def classify_signal(score):
+    if score >= 12:
+        return "🛡️ ZIRHLI"
+    if score >= 9:
+        return "🔥 GÜÇLÜ"
+    return None
+
+# ==================================================
+# SCAN (HATALAR TEMİZLENDİ)
 # ==================================================
 async def scan_coin(session, symbol, btc_bias, sem):
     global trading_paused
@@ -276,116 +188,80 @@ async def scan_coin(session, symbol, btc_bias, sem):
             kl = await fetch_json(session, "/fapi/v1/klines",
                                   {"symbol": symbol, "interval": "5m", "limit": 80})
             if not kl: return
-            kl_1h = await fetch_json(session, "/fapi/v1/klines",
-                                     {"symbol": symbol, "interval": "1h", "limit": 80})
 
             c = [float(k[4]) for k in kl]
             h = [float(k[2]) for k in kl]
             l = [float(k[3]) for k in kl]
             v = [float(k[5]) for k in kl]
-            tb = [float(k[9]) for k in kl]
 
             last = kl[-2]
-            open_p = float(last[1]); close_p = float(last[4])
-            vol = float(last[5]); tbuy = float(last[9])
+            open_p, close_p = float(last[1]), float(last[4])
+            vol, tbuy = float(last[5]), float(last[9])
             change = (close_p - open_p) / open_p * 100
 
-            vm = mean(v); vs = stdev(v) if len(v) > 1 else 0
-            vz = (vol - vm) / vs if vs > 0 else 0
+            vol_z = (vol - mean(v)) / stdev(v) if len(v) > 1 and stdev(v) > 0 else 0
 
-            vol_factor = calc_volatility_factor(c)
-            if abs(change) < 0.25 * vol_factor and vz < 0.8 * vol_factor:
+            # ---------- GİRİŞ SÜZGECİ (durgun coin) ----------
+            if abs(change) < 0.15 and vol_z < 0.6:
                 return
 
             regime = detect_regime(c, v)
             sw_up, sw_down = detect_sweep(h, l, c)
 
             atr_val = atr(h, l, c) or close_p * 0.005
-            comp, break_up, break_down = sideways_breakout(c, atr_val)
+            compressed, break_up, break_down = sideways_breakout(c, atr_val)
 
-            funding, oi_ch, ls = await get_heavy_data(session, symbol)
-            liq_l, liq_s = await get_liquidation_data(session, symbol)
+            of_score = orderflow_strength(vol, tbuy)
 
-            of_score, cvd_trend = orderflow_strength(vol, tbuy, tb, v)
-
-            bonus_l = bonus_s = 0
-            if kl_1h:
-                c1 = [float(k[4]) for k in kl_1h]
-                e20 = ema(c1, 20); e50 = ema(c1, 50)
-                if e20 and e50:
-                    if c1[-1] > e20 > e50: bonus_l += 3
-                    if c1[-1] < e20 < e50: bonus_s += 3
-
+            # ========== YÖNLÜ SKORLAMA (çift taraflı yok) ==========
             long_score = 0
             short_score = 0
 
-            if change > 1: long_score += 2 * weights["trend"]
-            if change < -1: short_score += 2 * weights["trend"]
+            # momentum (yönlü)
+            if change > 1.2: long_score += 2
+            if change < -1.2: short_score += 2
 
-            if vz > 2 * vol_factor:
-                long_score += 2 * weights["volume"]
-                short_score += 2 * weights["volume"]
+            # hacim patlaması (yön belirtmez, ikisine de düşük puan)
+            if vol_z > 2.5:
+                long_score += 1
+                short_score += 1
 
-            if regime == "TREND":
-                long_score += 1 * weights["regime"]
-                short_score += 1 * weights["regime"]
+            # sweep (yönlü, güçlü)
+            if sw_down: long_score += 4
+            if sw_up: short_score += 4
 
-            if sw_down: long_score += 3 * weights["whale"]
-            if sw_up: short_score += 3 * weights["whale"]
+            # sıkışma kırılımı (yönlü)
+            if compressed and break_up: long_score += 4
+            if compressed and break_down: short_score += 4
 
-            if oi_ch > 4:
-                long_score += 3
-                short_score += 3
-            if funding < -0.01 and change > 0: long_score += 3
-            if funding > 0.01 and change < 0: short_score += 3
-
-            if ls > 1.5: short_score += 1
-            if ls < 0.7: long_score += 1
-
-            if comp and break_up: long_score += 3 * weights["breakout"]
-            if comp and break_down: short_score += 3 * weights["breakout"]
-
+            # orderflow (yönlü)
             if of_score > 0: long_score += of_score
             if of_score < 0: short_score += abs(of_score)
-            if cvd_trend > 0: long_score += 2
-            if cvd_trend < 0: short_score += 2
 
-            long_score += bonus_l
-            short_score += bonus_s
+            # BTC bias (sadece +1, şişirme yok)
+            if btc_bias == "BULLISH": long_score += 1
+            elif btc_bias == "BEARISH": short_score += 1
 
-            if btc_bias == "BULLISH": long_score += 2; short_score -= 1
-            if btc_bias == "BEARISH": short_score += 2; long_score -= 1
-
-            if liq_l and liq_s:
-                if liq_l > liq_s * 1.3: long_score += 2
-                if liq_s > liq_l * 1.3: short_score += 2
-
+            # ========== EN İYİ SKOR ==========
             best = max(long_score, short_score)
-            # use_floor=False ile daha sıkı eşik
-            sig = classify_signal(best, vol_factor, use_floor=False)
-            if not sig:
-                return
+            sig = classify_signal(best)
+            if not sig: return
 
             direction = "LONG" if long_score > short_score else "SHORT"
 
-            if btc_bias == "BULLISH" and direction == "SHORT" and best < 11: return
-            if btc_bias == "BEARISH" and direction == "LONG" and best < 11: return
-
+            # cooldown
             now = time.time()
-            if symbol in last_signal and now - last_signal[symbol] < COOLDOWN: return
+            if symbol in last_signal and now - last_signal[symbol] < COOLDOWN:
+                return
             last_signal[symbol] = now
 
-            pnl = (best - 10) * 0.5
-            risk_engine(pnl)
-            evolve(pnl)
-
+            # TP / SL
             sl = close_p - atr_val * 1.5 if direction == "LONG" else close_p + atr_val * 1.5
-            tp = close_p + atr_val * 2.0 if direction == "LONG" else close_p - atr_val * 2.0
+            tp = close_p + atr_val * 2.5 if direction == "LONG" else close_p - atr_val * 2.5
 
-            confidence = min(95, int(best * 6))
             msg = (f"{sig} {symbol} {direction}\n"
-                   f"Güven: %{confidence}\n"
-                   f"TP:{tp:.4f} SL:{sl:.4f}")
+                   f"Giriş: {close_p:.4f}\n"
+                   f"TP: {tp:.4f}  SL: {sl:.4f}")
             print(msg)
             await send_telegram(msg)
 
@@ -393,121 +269,28 @@ async def scan_coin(session, symbol, btc_bias, sem):
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST (AYNI KALDI, GEÇMİŞ RAPOR İÇİN)
-# ==================================================
-async def run_backtest(session):
-    try:
-        await send_telegram("📊 BACKTEST BAŞLADI")
-        syms = await get_all_symbols(session)
-        if not syms:
-            await send_telegram("❌ Sembol listesi boş!")
-            return
-        await send_telegram(f"📋 {len(syms)} sembol bulundu")
-        test = syms[:200]
-        total = wins = 0
-        pnl_net = 0.0
-        comm = 0.0004; slip = 0.0002
-
-        for sym in test:
-            kl = await fetch_json(session, "/fapi/v1/klines",
-                                  {"symbol": sym, "interval": "5m", "limit": 1000})
-            if not kl or len(kl) < 50: continue
-            for i in range(200, len(kl)-1):
-                win = kl[i-49:i+1] if i >= 49 else kl[:i+1]
-                if len(win) < 30: continue
-                c = [float(k[4]) for k in win]; h = [float(k[2]) for k in win]
-                l = [float(k[3]) for k in win]; v = [float(k[5]) for k in win]
-                tb = [float(k[9]) for k in win]
-                last = win[-1]; op = float(last[1]); cp = float(last[4])
-                vol = float(last[5]); tbuy = float(last[9])
-                change = (cp - op) / op * 100
-                if vol <= 0 or abs(change) < 0.1: continue
-
-                regime = detect_regime(c, v)
-                sw_up, sw_down = detect_sweep(h, l, c)
-                atr_val = atr(h, l, c) or cp * 0.005
-                comp, bu, bd = sideways_breakout(c, atr_val)
-                of, cvd = orderflow_strength(vol, tbuy, tb, v)
-
-                long = short = 0
-                if change > 0.5: long += 1
-                if change < -0.5: short += 1
-                if sw_down: long += 2
-                if sw_up: short += 2
-                if comp and bu: long += 2
-                if comp and bd: short += 2
-                if of > 0: long += of
-                if of < 0: short += abs(of)
-                if cvd > 0: long += 1
-                if cvd < 0: short += 1
-                if regime == "TREND": long += 1; short += 1
-
-                best = max(long, short)
-                sig = classify_signal(best, 0.2, use_floor=False)
-                if not sig: continue
-
-                dir = "LONG" if long > short else "SHORT"
-                entry = cp
-                tp = entry + atr_val*2 if dir=="LONG" else entry - atr_val*2
-                sl = entry - atr_val*1.5 if dir=="LONG" else entry + atr_val*1.5
-                entry_real = entry * (1+slip+comm) if dir=="LONG" else entry * (1-slip-comm)
-                fut = [float(k[4]) for k in kl[i+1:i+31]]
-                exit_p = None
-                for p in fut:
-                    if dir=="LONG":
-                        if p >= tp: exit_p = tp*(1-comm-slip); wins += 1; break
-                        elif p <= sl: exit_p = sl*(1-comm-slip); break
-                    else:
-                        if p <= tp: exit_p = tp*(1-comm-slip); wins += 1; break
-                        elif p >= sl: exit_p = sl*(1-comm-slip); break
-                if exit_p is None: exit_p = entry_real
-                pnl_net += (exit_p - entry_real) / entry_real * 100
-                total += 1
-
-        winrate = wins/total*100 if total else 0
-        avg = pnl_net/total if total else 0
-        pf = (pnl_net+wins)/(abs(pnl_net)+(total-wins)) if total else 0
-        msg = (f"📊 BACKTEST\nSinyal:{total} Kazan:{wins} (%{winrate:.1f})\n"
-               f"Ort.PnL:%{avg:.2f} Küm.PnL:%{pnl_net:.2f} PF:{pf:.2f}")
-        await send_telegram(msg)
-    except Exception as e:
-        logging.error(f"Backtest: {traceback.format_exc()}")
-
-# ==================================================
-# MAIN (TEMIZ OTURUM)
+# MAIN
 # ==================================================
 async def main():
-    print("🚀 SADECE GÜÇLÜ SİNYAL BOTU BAŞLATILDI")
+    print("🚀 TEMİZ SİNYAL BOTU (çift yönlü puanlar temizlendi)")
     async with aiohttp.ClientSession() as session:
         worker = asyncio.create_task(telegram_worker(session))
-        await send_telegram("✅ GÜÇLÜ/ZIRHLI SİNYAL BOTU AKTİF")
+        await send_telegram("✅ TEMİZ BOT AKTİF")
 
-        if await fetch_json(session, "/fapi/v1/ping") is not None:
-            await send_telegram("🌐 Binance bağlantısı başarılı")
+        if await fetch_json(session, "/fapi/v1/ping"):
+            print("Binance bağlantısı başarılı")
         else:
-            await send_telegram("⚠️ Bağlantı başarısız, ancak denemeye devam edilecek.")
+            await send_telegram("⚠️ Binance bağlantısı başarısız!")
 
         syms = await get_all_symbols(session)
-        print(f"{len(syms)} coin")
+        print(f"{len(syms)} coin taranıyor")
         sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-        asyncio.create_task(run_backtest(session))
-        last_backtest = time.time()
-
-        try:
-            while True:
-                bias = await get_btc_bias(session)
-                tasks = [scan_coin(session, sym, bias, sem) for sym in syms]
-                await asyncio.gather(*tasks, return_exceptions=True)
-                if time.time() - last_backtest > 86400:
-                    asyncio.create_task(run_backtest(session))
-                    last_backtest = time.time()
-                await asyncio.sleep(SCAN_INTERVAL)
-        except asyncio.CancelledError:
-            print("Bot kapatılıyor...")
-        finally:
-            worker.cancel()
-            await worker
+        while True:
+            bias = await get_btc_bias(session)
+            tasks = [scan_coin(session, s, bias, sem) for s in syms]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
     asyncio.run(main())
