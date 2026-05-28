@@ -16,10 +16,12 @@ COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY")
 BASE_URL = "https://fapi.binance.com"
 
 SCAN_INTERVAL = 40
-COOLDOWN = 600
+COOLDOWN = 600                 # symbol bazlı (10 dk)
+GLOBAL_COOLDOWN = 120          # market‑wide (2 dk)
 MAX_CONCURRENT_REQUESTS = 20
 
 last_signal = {}
+last_global_signal = 0
 
 # ==================================================
 # PORTFOLIO & RISK
@@ -72,7 +74,7 @@ async def send_telegram(text):
     await telegram_queue.put(text)
 
 # ==================================================
-# FETCH (USER-AGENT + RETRY)
+# FETCH (429 rate‑limit korumalı)
 # ==================================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -85,11 +87,28 @@ async def fetch_json(session, endpoint, params=None, max_retries=3):
             async with session.get(url, params=params, headers=HEADERS, timeout=10) as resp:
                 if resp.status == 200:
                     return await resp.json()
+                elif resp.status == 429:
+                    retry_after = resp.headers.get("Retry-After", "5")
+                    try:
+                        wait = int(retry_after)
+                    except ValueError:
+                        wait = 5
+                    logging.warning(f"429 Rate‑limit, {wait}s bekleniyor.")
+                    await asyncio.sleep(wait)
+                    continue
                 elif resp.status in (403, 451):
+                    logging.error(f"Blocked {resp.status} at {url}")
                     return None
-        except:
-            pass
-        await asyncio.sleep(1)
+                else:
+                    logging.error(f"HTTP {resp.status} for {url}")
+        except asyncio.TimeoutError:
+            logging.error(f"Timeout {endpoint}")
+        except Exception:
+            logging.exception(f"Fetch error {endpoint}")
+
+        if attempt < max_retries - 1:
+            await asyncio.sleep(2 ** attempt)
+
     return None
 
 # ==================================================
@@ -109,20 +128,22 @@ def atr(highs, lows, closes, period=14):
     return mean(tr[-period:]) if len(tr) >= period else None
 
 def detect_sweep(highs, lows, closes):
-    rh = max(highs[-20:-1])
-    rl = min(lows[-20:-1])
+    rh = max(highs[-21:-1]) if len(highs) >= 21 else max(highs[:-1])
+    rl = min(lows[-21:-1]) if len(lows) >= 21 else min(lows[:-1])
     up = highs[-1] > rh and closes[-1] < highs[-1]
     down = lows[-1] < rl and closes[-1] > lows[-1]
     return up, down
 
-def sideways_breakout(closes, atr_val=None):
-    recent = closes[-15:]
-    highest, lowest = max(recent), min(recent)
+def sideways_breakout(closes):
+    recent = closes[-16:-1]  # son 15 tamamlanmış mum
+    if len(recent) < 15: return False, False, False
+    highest = max(recent)
+    lowest = min(recent)
     range_pct = (highest - lowest) / lowest * 100
-    factor = max((atr_val / highest) * 2, 0.001) if (atr_val and highest > 0) else 0.002
-    up = closes[-1] > highest * (1 - factor)
-    down = closes[-1] < lowest * (1 + factor)
-    return range_pct < 2.5, up, down
+    compressed = range_pct < 2.5
+    up = closes[-1] > highest and closes[-2] <= highest
+    down = closes[-1] < lowest and closes[-2] >= lowest
+    return compressed, up, down
 
 def orderflow_strength(volume, taker_buy):
     if volume <= 0: return 0
@@ -136,7 +157,7 @@ def orderflow_strength(volume, taker_buy):
     return score
 
 # ==================================================
-# EXTERNAL DATA (sadece OI ve funding, yönlü)
+# EXTERNAL DATA
 # ==================================================
 async def get_heavy_data(session, symbol):
     funding = 0.0; oi_change = 0.0
@@ -151,17 +172,22 @@ async def get_heavy_data(session, symbol):
     return funding, oi_change
 
 # ==================================================
-# BTC BIAS (hafif)
+# BTC BIAS + RELATIVE STRENGTH
 # ==================================================
-async def get_btc_bias(session):
+async def get_btc_data(session):
     kl = await fetch_json(session, "/fapi/v1/klines", {"symbol":"BTCUSDT","interval":"15m","limit":50})
-    if not kl: return "NEUTRAL"
+    if not kl: return "NEUTRAL", 0.0
     c = [float(k[4]) for k in kl]
     e20, e50 = ema(c, 20), ema(c, 50)
-    if not e20 or not e50: return "NEUTRAL"
-    if c[-1] > e20 > e50: return "BULLISH"
-    if c[-1] < e20 < e50: return "BEARISH"
-    return "NEUTRAL"
+    if not e20 or not e50: return "NEUTRAL", 0.0
+    if c[-1] > e20 > e50: bias = "BULLISH"
+    elif c[-1] < e20 < e50: bias = "BEARISH"
+    else: bias = "NEUTRAL"
+
+    btc_last = kl[-2]
+    btc_open, btc_close = float(btc_last[1]), float(btc_last[4])
+    btc_change = (btc_close - btc_open) / btc_open * 100
+    return bias, btc_change
 
 # ==================================================
 # SYMBOLS
@@ -173,7 +199,7 @@ async def get_all_symbols(session):
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
 # ==================================================
-# CLASSIFY (sabit, yüksek eşik)
+# CLASSIFY
 # ==================================================
 def classify_signal(score):
     if score >= 14: return "🛡️ ZIRHLI"
@@ -202,30 +228,53 @@ def evolve(pnl):
     for k in weights: weights[k] = max(0.4, min(weights[k], 2.5))
 
 # ==================================================
-# SCAN (TEMİZ, YÖNLÜ, SEBEPLİ)
+# SCAN
 # ==================================================
-async def scan_coin(session, symbol, btc_bias, sem):
-    global trading_paused
+async def scan_coin(session, symbol, btc_bias, btc_change, sem):
+    global trading_paused, last_global_signal
     async with sem:
         if trading_paused: return
         try:
             kl = await fetch_json(session, "/fapi/v1/klines",
                                   {"symbol": symbol, "interval": "5m", "limit": 80})
             if not kl: return
-            kl_1h = await fetch_json(session, "/fapi/v1/klines",
-                                     {"symbol": symbol, "interval": "1h", "limit": 80})
 
-            c = [float(k[4]) for k in kl]
-            h = [float(k[2]) for k in kl]
-            l = [float(k[3]) for k in kl]
-            v = [float(k[5]) for k in kl]
+            closed_kl = kl[:-1]
 
-            last = kl[-2]
+            c = [float(k[4]) for k in closed_kl]
+            h = [float(k[2]) for k in closed_kl]
+            l = [float(k[3]) for k in closed_kl]
+            v = [float(k[5]) for k in closed_kl]
+            qv = [float(k[7]) for k in closed_kl]
+
+            last = closed_kl[-1]
             open_p, close_p = float(last[1]), float(last[4])
+            high_p, low_p = float(last[2]), float(last[3])
             vol, tbuy = float(last[5]), float(last[9])
+
+            # ========== DÜŞÜK LİKİDİTE ==========
+            quote_volume_12 = sum(qv[-12:])
+            if quote_volume_12 < 15_000_000:
+                return
+
+            # ========== WICK MANIPULATION (0.45) ==========
+            body = abs(close_p - open_p)
+            candle_range = high_p - low_p
+            body_ratio = body / candle_range if candle_range > 0 else 0
+            if body_ratio < 0.45:
+                return
+
             change = (close_p - open_p) / open_p * 100
 
             vol_z = (vol - mean(v)) / stdev(v) if len(v) > 1 and stdev(v) > 0 else 0
+
+            # ========== TREND FİLTRESİ ==========
+            ema20 = ema(c, 20)
+            ema50 = ema(c, 50)
+            if not ema20 or not ema50:
+                return
+            trend_long = close_p > ema20 > ema50 and (ema20 - ema50) > close_p * 0.003
+            trend_short = close_p < ema20 < ema50 and (ema50 - ema20) > close_p * 0.003
 
             # giriş süzgeci
             if abs(change) < 0.2 and vol_z < 0.8:
@@ -233,36 +282,29 @@ async def scan_coin(session, symbol, btc_bias, sem):
 
             sw_up, sw_down = detect_sweep(h, l, c)
             atr_val = atr(h, l, c) or close_p * 0.005
-            compressed, break_up, break_down = sideways_breakout(c, atr_val)
+            compressed, break_up, break_down = sideways_breakout(c)
             of_score = orderflow_strength(vol, tbuy)
             funding, oi_ch = await get_heavy_data(session, symbol)
 
-            # 1H trend bonusu (yönlü)
-            bonus_l = bonus_s = 0
-            if kl_1h:
-                c1 = [float(k[4]) for k in kl_1h]
-                e20, e50 = ema(c1, 20), ema(c1, 50)
-                if e20 and e50:
-                    if c1[-1] > e20 > e50: bonus_l += 2
-                    if c1[-1] < e20 < e50: bonus_s += 2
-
-            # ========== SKORLAMA (tamamen yönlü) ==========
+            # ========== SKORLAMA ==========
             long_score = 0
             short_score = 0
             reasons = []
 
             # momentum
-            if change > 1.5:
+            if change > 0.9 and close_p > c[-5]:
                 long_score += 3 * weights["trend"]
                 reasons.append("Güçlü yükseliş")
-            if change < -1.5:
+            if change < -0.9 and close_p < c[-5]:
                 short_score += 3 * weights["trend"]
                 reasons.append("Güçlü düşüş")
 
             # hacim
-            if vol_z > 2.5:
-                long_score += 1 * weights["volume"]
-                short_score += 1 * weights["volume"]
+            if vol_z > 3 and vol > mean(v[-20:]) * 2.2:
+                if change > 0:
+                    long_score += 2 * weights["volume"]
+                else:
+                    short_score += 2 * weights["volume"]
                 reasons.append("Hacim patlaması")
 
             # sweep
@@ -285,13 +327,15 @@ async def scan_coin(session, symbol, btc_bias, sem):
             if of_score > 0: long_score += of_score
             if of_score < 0: short_score += abs(of_score)
 
-            # OI (yön belirtmez ama trend güçlendirir)
-            if oi_ch > 4:
-                long_score += 1
-                short_score += 1
-                reasons.append("OI artışı")
+            # OI (yönlü)
+            if oi_ch > 4 and change > 0:
+                long_score += 2
+                reasons.append("OI artışı + yükseliş")
+            if oi_ch > 4 and change < 0:
+                short_score += 2
+                reasons.append("OI artışı + düşüş")
 
-            # funding squeeze (yönlü)
+            # funding squeeze
             if funding < -0.005 and change > 0:
                 long_score += 3
                 reasons.append("Short squeeze riski")
@@ -299,13 +343,23 @@ async def scan_coin(session, symbol, btc_bias, sem):
                 short_score += 3
                 reasons.append("Long squeeze riski")
 
-            # 1H bonus
-            long_score += bonus_l
-            short_score += bonus_s
-            if bonus_l: reasons.append("1H trend yukarı")
-            if bonus_s: reasons.append("1H trend aşağı")
+            # TREND
+            if trend_long:
+                long_score += 3
+                reasons.append("Trend yukarı")
+            if trend_short:
+                short_score += 3
+                reasons.append("Trend aşağı")
 
-            # BTC bias (hafif)
+            # BTC relative strength
+            if change > btc_change * 1.8:
+                long_score += 2
+                reasons.append("BTC'ye göre güçlü")
+            if btc_change > 0.5 and change < -0.5:
+                short_score += 2
+                reasons.append("BTC'ye göre zayıf")
+
+            # BTC bias
             if btc_bias == "BULLISH": long_score += 1
             if btc_bias == "BEARISH": short_score += 1
 
@@ -316,10 +370,15 @@ async def scan_coin(session, symbol, btc_bias, sem):
             direction = "LONG" if long_score > short_score else "SHORT"
 
             now = time.time()
-            if symbol in last_signal and now - last_signal[symbol] < COOLDOWN: return
-            last_signal[symbol] = now
+            # Market‑wide cooldown kontrolü
+            if now - last_global_signal < GLOBAL_COOLDOWN:
+                return
+            if symbol in last_signal and now - last_signal[symbol] < COOLDOWN:
+                return
 
-            # Risk güncellemesi (sanal PnL)
+            last_signal[symbol] = now
+            last_global_signal = now
+
             pnl = (best - 10) * 0.4
             risk_engine(pnl)
             evolve(pnl)
@@ -340,7 +399,7 @@ async def scan_coin(session, symbol, btc_bias, sem):
             logging.error(f"SCAN {symbol}: {traceback.format_exc()}")
 
 # ==================================================
-# BACKTEST (basit, günlük rapor)
+# BACKTEST
 # ==================================================
 async def run_backtest(session):
     try:
@@ -367,7 +426,7 @@ async def run_backtest(session):
 
                 sw_up, sw_down = detect_sweep(h, l, c)
                 atr_val = atr(h, l, c) or cp * 0.005
-                compressed, bu, bd = sideways_breakout(c, atr_val)
+                compressed, bu, bd = sideways_breakout(c)
                 of = orderflow_strength(vol, tbuy)
 
                 long = short = 0
@@ -400,6 +459,7 @@ async def run_backtest(session):
                 if exit_p is None: exit_p = entry_real
                 pnl_net += (exit_p - entry_real) / entry_real * 100
                 total += 1
+            await asyncio.sleep(0.01)
 
         winrate = wins/total*100 if total else 0
         avg = pnl_net/total if total else 0
@@ -415,10 +475,11 @@ async def run_backtest(session):
 # MAIN
 # ==================================================
 async def main():
-    print("🚀 PROFESYONEL TEMİZ BOT")
+    global trading_paused
+    print("🚀 PROFESYONEL BOT (GLOBAL COOLDOWN + OPTİMİZASYON)")
     async with aiohttp.ClientSession() as session:
         worker = asyncio.create_task(telegram_worker(session))
-        await send_telegram("✅ TEMİZ SİNYAL BOTU BAŞLATILDI")
+        await send_telegram("✅ BOT AKTIF (global cooldown, optimize filtreler)")
 
         if await fetch_json(session, "/fapi/v1/ping"):
             print("Binance bağlantısı başarılı")
@@ -433,8 +494,12 @@ async def main():
         last_backtest = time.time()
 
         while True:
-            bias = await get_btc_bias(session)
-            tasks = [scan_coin(session, s, bias, sem) for s in syms]
+            if trading_paused:
+                await send_telegram("🛑 Risk limitine ulaşıldı, bot tamamen durduruluyor!")
+                break
+
+            btc_bias, btc_change = await get_btc_data(session)
+            tasks = [scan_coin(session, s, btc_bias, btc_change, sem) for s in syms]
             await asyncio.gather(*tasks, return_exceptions=True)
 
             if time.time() - last_backtest > 86400:
@@ -442,6 +507,9 @@ async def main():
                 last_backtest = time.time()
 
             await asyncio.sleep(SCAN_INTERVAL)
+
+        worker.cancel()
+        await worker
 
 if __name__ == "__main__":
     asyncio.run(main())
