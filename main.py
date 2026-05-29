@@ -26,7 +26,7 @@ GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 3
 BATCH_SIZE = 25
 
-# Kalibre edilmiş skor eşikleri
+# Kalibre edilmiş skor eşikleri (daha sıkı)
 MIN_SCORE_BASE = 8
 MIN_SCORE_HIGH_VOLATILITY = 10
 MIN_SCORE_LOW_VOLATILITY = 6
@@ -54,7 +54,6 @@ EXCLUDE_FROM_VOLUME_CALC = {
     "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT", "FDUSDUSDT"
 }
 
-# Altın gibi emtia/usd çiftleri - tarama dışı
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
 
 # =========================================================
@@ -237,7 +236,6 @@ def calculate_atr(highs, lows, closes, period=10):
 # COIN LİSTESİ
 # =========================================================
 async def get_spot_symbols(session):
-    # Sadece TR listesindeki coin'leri kullan, PAXG gibi emtiaları çıkar
     return {s for s in TR_COIN_LIST if s not in COMMODITY_BLACKLIST}
 
 async def get_futures_symbols(session):
@@ -277,7 +275,7 @@ def calculate_dynamic_volume_threshold(volumes):
     return threshold
 
 # =========================================================
-# SCAN COIN (KALİBRE EDİLMİŞ SKORLAMA)
+# SCAN COIN (ERKEN UYARI ODAKLI, SIKI KALİBRASYON)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                     btc_change, min_score, dynamic_min_volume,
@@ -298,10 +296,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     change_pct = ((close_p - open_p) / open_p) * 100
 
     if 0.99 < close_p < 1.01 and abs(change_pct) < 0.1: return None
-    if len(closed) >= 13:
-        if (close_p - float(closed[-13][4])) / float(closed[-13][4]) * 100 > 8.0: return None
 
-    # Dinamik hacim filtresi
+    # ZATEN GİTMİŞ COİN FİLTRESİ: son 1 saatte %5'ten fazla yükselmişse ele
+    if len(closed) >= 13:
+        price_1h_ago = float(closed[-13][4])
+        hour_change = (close_p - price_1h_ago) / price_1h_ago * 100
+        if hour_change > 5.0: return None
+
     if quote_vol < dynamic_min_volume or abs(change_pct) > 8.0: return None
 
     prev_vols = [float(k[5]) for k in kl_5m[-7:-2]]
@@ -361,24 +362,24 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
             if hh[-1] > hh[-2] and ll[-1] > ll[-2]:
                 bull_struct = True
 
-    # ========== YENİ KALİBRE EDİLMİŞ SKORLAMA ==========
+    # ========== ERKEN UYARI SKORLAMASI (SIKI) ==========
     score = 0
     reasons = []
     squeeze = False
 
-    # Hacim patlaması - kalibre edildi
+    # Hacim patlaması
     if speed > 2.0 and change_pct > 0:
-        score += 3; reasons.append("💪 Yüksek hacim")
+        score += 3; reasons.append("💪 Hacim")
     elif speed > 1.5 and change_pct > 0:
         score += 2; reasons.append("Hacim")
 
-    # Normalize hareket - daha sıkı
+    # Normalize hareket
     if high > low:
         norm = change_pct / ((high - low) / close_p * 100) if ((high - low) / close_p * 100) > 0 else 0
         if 0.3 < norm < 4 and norm > 0:
             score += 2; reasons.append("Norm")
 
-    # Taker ve Delta - daha sıkı
+    # Taker ve Delta (daha sıkı)
     if taker_r > 0.58: score += 2; reasons.append("Taker")
     if delta_r > 0.15: score += 2; reasons.append("Delta")
 
@@ -386,7 +387,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if funding_rate < -0.005 and change_pct > 0:
         score += 2; squeeze = True; reasons.append("Squeeze")
 
-    # Gerçek RS - daha sıkı
+    # RS
     if len(closes) >= 12:
         coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
         rs = coin_mom - btc_change
@@ -394,51 +395,53 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     else:
         rs = 0.0
 
-    # Sıkışma kırılımı - daha sıkı
+    # Sıkışma kırılımı (en değerli sinyal)
     if heavy and len(kl_5m) > 6:
         r_high = max(float(k[2]) for k in kl_5m[-7:-2])
         r_low = min(float(k[3]) for k in kl_5m[-7:-2])
         comp = (r_high - r_low) / close_p * 100 if close_p > 0 else 0
         if comp < 1.0 and speed > 2.0 and delta_r > 0.15:
-            score += 4; reasons.append("Kırılım")
+            score += 5; reasons.append("🔥 Sıkışma kırılımı")
 
     # BTC'ye rağmen güçlü
     if has_oi and btc_change <= 0 and oi_change > 2 and delta_r > 0.15:
         score += 3; reasons.append("BTC↓ güçlü")
 
-    # Trend - azaltıldı
+    # Trend (az puan)
     if ema20_1h is not None and close_p > ema20_1h: score += 1; reasons.append("1h↑")
     if ema50_4h is not None and close_p > ema50_4h: score += 1; reasons.append("4h↑")
     if bull_struct: score += 1; reasons.append("15m↑")
 
-    # RelVol - azaltıldı
+    # RelVol
     if rel_vol > 2.0: score += 2; reasons.append("RelVol")
     elif rel_vol > 1.5: score += 1
 
-    # Wick cezası - aynı
+    # Wick cezası
     if wick_r > 0.6: score -= 1
 
-    # BTC etkisi - aynı
+    # BTC etkisi
     if btc_change <= -0.8: score -= 4; reasons.append("BTC↓")
     if btc_change > 1.5 and symbol != "BTCUSDT": score -= 2
 
-    # Multi-TF uyumu - azaltıldı
+    # Multi-TF uyumu
     if ema50_4h is not None and ema20_1h is not None and close_p > ema50_4h and close_p > ema20_1h and bull_struct:
         score += 2; reasons.append("MTF")
 
-    # RSI - daha sıkı
-    if rsi is not None and 40 < rsi < 60 and close_p > open_p:
+    # RSI (erken dönüş yakala)
+    if rsi is not None and 30 < rsi < 50 and close_p > open_p:
+        score += 2; reasons.append(f"RSI{rsi:.0f} dip")
+    elif rsi is not None and 50 <= rsi < 70 and close_p > open_p:
         score += 1; reasons.append(f"RSI{rsi:.0f}")
 
-    # MACD - aynı
+    # MACD
     if macd_l is not None and sig_l is not None and macd_l > sig_l and hist > 0:
         score += 2; reasons.append("MACD")
 
-    # Bollinger - daha sıkı
-    if bb_lower is not None and close_p <= bb_lower * 1.005 and change_pct > 0:
+    # Bollinger alt dönüş
+    if bb_lower is not None and close_p <= bb_lower * 1.01 and change_pct > 0:
         score += 2; reasons.append("BB")
 
-    # YENİ: Kalite kontrolü - en az 2 farklı kategoriden puan almalı
+    # KALİTE KONTROLÜ: en az 4 farklı kategoriden sinyal
     categories = set()
     if speed > 1.2: categories.add("hacim")
     if taker_r > 0.55: categories.add("taker")
@@ -447,9 +450,9 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if bull_struct or (ema20_1h is not None and close_p > ema20_1h): categories.add("trend")
     if bb_lower is not None and close_p <= bb_lower * 1.01: categories.add("bb")
     if macd_l is not None and sig_l is not None and macd_l > sig_l: categories.add("macd")
+    if rsi is not None and 30 < rsi < 70: categories.add("rsi")
 
-    # En az 3 farklı kategoriden sinyal gelmeli
-    if len(categories) < 3:
+    if len(categories) < 4:
         return None
 
     if score < min_score: return None
@@ -471,15 +474,15 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     }
 
 # =========================================================
-# MAIN
+# MAIN (DEĞİŞİKLİK YOK)
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 KALİBRE SNIPER BOT ({len(TR_COIN_LIST)} coin)")
+    print(f"🚀 ERKEN UYARI SNIPER BOT ({len(TR_COIN_LIST)} coin)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 Kalibre Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin)")
+        await send_telegram(session, f"🎯 Erken Uyarı Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin)")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
