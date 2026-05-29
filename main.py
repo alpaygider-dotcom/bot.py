@@ -38,7 +38,12 @@ CACHE_1H = 300
 CACHE_4H = 900
 CACHE_OI = 120
 CACHE_FUNDING = 300
-CACHE_LS = 120  # Long/Short ratio cache
+
+# Long/Short cache süreleri (saniye)
+CACHE_LS_5M = 120
+CACHE_LS_1H = 600
+CACHE_LS_6H = 1800
+CACHE_LS_12H = 3600
 
 BATCH_SIZE = 25
 MAX_CONSECUTIVE_ERRORS = 15
@@ -56,7 +61,6 @@ EXCLUDE_FROM_VOLUME_CALC = {
 
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
 
-# XMR ÇIKARILDI
 TR_COIN_LIST = sorted([
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SOLUSDT", "AVAXUSDT",
     "DOTUSDT", "LINKUSDT", "UNIUSDT", "MATICUSDT", "SHIBUSDT", "DOGEUSDT",
@@ -93,7 +97,8 @@ TR_COIN_LIST = sorted([
 ])
 
 cache = {
-    "funding": {}, "oi": {}, "ls": {},
+    "funding": {}, "oi": {},
+    "ls_5m": {}, "ls_1h": {}, "ls_6h": {}, "ls_12h": {},
     "klines_5m": {}, "klines_15m": {}, "klines_1h": {}, "klines_4h": {}
 }
 last_signals = {}
@@ -317,7 +322,7 @@ def calculate_dynamic_volume_threshold(volumes):
     return threshold
 
 # =========================================================
-# SCAN COIN (LONG/SHORT FİLTRESİ EKLENDİ)
+# SCAN COIN (ÇOKLU LS FİLTRESİ)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                     btc_change, min_score, dynamic_min_volume,
@@ -374,10 +379,25 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     oi_change = 0.0
     has_oi = False
     funding_rate = 0.0
-    ls_prev = None
-    ls_curr = None
-    ls_change = 0.0
-    
+
+    # LS değişkenleri
+    ls_5m_str = "N/A"
+    ls_1h_str = "N/A"
+    ls_6h_str = "N/A"
+    ls_12h_str = "N/A"
+    ls_5m_change = 0.0
+    ls_1h_change = 0.0
+    ls_6h_change = 0.0
+    ls_12h_change = 0.0
+    ls_5m_prev = None
+    ls_1h_prev = None
+    ls_6h_prev = None
+    ls_12h_prev = None
+    ls_5m_curr = None
+    ls_1h_curr = None
+    ls_6h_curr = None
+    ls_12h_curr = None
+
     if is_futures:
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
@@ -395,17 +415,44 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                                     "/fapi/v1/premiumIndex", {"symbol": symbol}, CACHE_FUNDING)
             if fund: funding_rate = float(fund.get("lastFundingRate", 0))
         except: pass
-        
-        # LONG/SHORT ORANI
+
+        # 5 dakikalık LS (her zaman çek)
         try:
-            ls_data = await get_cached(session, "ls", symbol, FAPI_URL,
-                                       "/futures/data/globalLongShortAccountRatio",
-                                       {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS)
-            if ls_data and len(ls_data) >= 2:
-                ls_prev = float(ls_data[-2]["longShortRatio"])
-                ls_curr = float(ls_data[-1]["longShortRatio"])
-                ls_change = ((ls_curr - ls_prev) / ls_prev) * 100  # Yüzdesel değişim
+            ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
+                                    "/futures/data/globalLongShortAccountRatio",
+                                    {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS_5M)
+            if ls5m and len(ls5m) >= 2:
+                ls_5m_prev = float(ls5m[-2]["longShortRatio"])
+                ls_5m_curr = float(ls5m[-1]["longShortRatio"])
+                ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
+                ls_5m_str = f"5m:{ls_5m_prev:.1f}→{ls_5m_curr:.1f}"
         except: pass
+
+        # 1h, 6h, 12h LS sadece heavy_check varsa
+        if heavy:
+            for period, cache_key, duration, var_prefix in [
+                ("1h", "ls_1h", CACHE_LS_1H, "ls_1h"),
+                ("6h", "ls_6h", CACHE_LS_6H, "ls_6h"),
+                ("12h", "ls_12h", CACHE_LS_12H, "ls_12h")
+            ]:
+                try:
+                    ls_data = await get_cached(session, cache_key, symbol, FAPI_URL,
+                                               "/futures/data/globalLongShortAccountRatio",
+                                               {"symbol": symbol, "period": period, "limit": 2}, duration)
+                    if ls_data and len(ls_data) >= 2:
+                        prev = float(ls_data[-2]["longShortRatio"])
+                        curr = float(ls_data[-1]["longShortRatio"])
+                        change = ((curr - prev) / prev) * 100
+                        if var_prefix == "ls_1h":
+                            ls_1h_prev, ls_1h_curr, ls_1h_change = prev, curr, change
+                            ls_1h_str = f"1h:{prev:.1f}→{curr:.1f}"
+                        elif var_prefix == "ls_6h":
+                            ls_6h_prev, ls_6h_curr, ls_6h_change = prev, curr, change
+                            ls_6h_str = f"6h:{prev:.1f}→{curr:.1f}"
+                        elif var_prefix == "ls_12h":
+                            ls_12h_prev, ls_12h_curr, ls_12h_change = prev, curr, change
+                            ls_12h_str = f"12h:{prev:.1f}→{curr:.1f}"
+                except: pass
 
     ema20_1h = ema50_4h = None
     bull_struct = False
@@ -483,17 +530,24 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     else:
         score += 2; reasons.append(f"✅ RS {rs:.2f}")
 
-    # LONG/SHORT FİLTRESİ
-    if ls_curr is not None and ls_prev is not None:
-        if ls_change < 0:  # Short'lar artıyor → Short squeeze potansiyeli
-            if ls_change < -2:  # %2'den fazla düşüş
-                score += 3; reasons.append(f"📉 Short squeeze ({ls_prev:.1f}→{ls_curr:.1f})")
-            elif ls_change < -1:
-                score += 2; reasons.append(f"📉 LS düşüyor ({ls_prev:.1f}→{ls_curr:.1f})")
-            else:
-                score += 1; reasons.append(f"LS hafif düşüş")
-        else:  # Long'lar artıyor → aşırı kalabalık
-            score -= 1
+    # ÇOKLU LONG/SHORT FİLTRESİ (anlamlı düşüşler ödüllendirilir)
+    ls_details = []
+    if ls_5m_curr is not None and ls_5m_change < -2:  # %2'den fazla düşüş
+        score += 2; reasons.append(f"LS 5m↓ {ls_5m_str}")
+        ls_details.append(ls_5m_str)
+    if ls_1h_curr is not None and ls_1h_change < -5:  # %5'ten fazla düşüş
+        score += 3; reasons.append(f"LS 1h↓ {ls_1h_str}")
+        ls_details.append(ls_1h_str)
+    if ls_6h_curr is not None and ls_6h_change < -8:  # %8'den fazla düşüş
+        score += 5; reasons.append(f"LS 6h↓↓ {ls_6h_str}")
+        ls_details.append(ls_6h_str)
+    if ls_12h_curr is not None and ls_12h_change < -10:  # %10'dan fazla düşüş
+        score += 8; reasons.append(f"LS 12h↓↓↓ {ls_12h_str}")
+        ls_details.append(ls_12h_str)
+    
+    # Eğer birden fazla LS zaman diliminde düşüş varsa ek bonus
+    if len(ls_details) >= 2:
+        score += 3; reasons.append("Multi-TF LS squeeze")
 
     if heavy and len(kl_5m) > 6:
         r_high = max(float(k[2]) for k in kl_5m[-7:-2])
@@ -552,6 +606,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if macd_l is not None and sig_l is not None and macd_l > sig_l: categories.add("macd")
     if rsi is not None and 30 < rsi < 70: categories.add("rsi")
     if recent_volatility < older_volatility * 0.7: categories.add("squeeze_setup")
+    if ls_details: categories.add("ls_squeeze")
 
     if len(categories) < 5:
         return None
@@ -564,11 +619,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     tp_pct = round((tp_price - close_p) / close_p * 100, 2)
     sl_pct = round((close_p - sl_price) / close_p * 100, 2)
 
-    # LS string oluştur
-    if ls_prev is not None and ls_curr is not None:
-        ls_str = f"{ls_prev:.1f}→{ls_curr:.1f} ({ls_change:+.1f}%)"
-    else:
-        ls_str = "N/A"
+    # LS gösterimi
+    ls_full_str = " | ".join(ls_details) if ls_details else "N/A"
 
     return {
         "symbol": symbol, "score": score, "conf": conf,
@@ -576,7 +628,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
         "oi": round(oi_change, 2) if has_oi else -999,
         "funding": funding_rate, "delta": delta_r,
         "rel_vol": rel_vol, "squeeze": squeeze, "rs": round(rs, 2),
-        "ls": ls_str, "ls_change": ls_change,
+        "ls": ls_full_str,
         "tp": tp_price, "sl": sl_price, "tp_pct": tp_pct, "sl_pct": sl_pct,
         "reasons": reasons
     }
@@ -586,11 +638,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 LONG/SHORT FİLTRELİ SNIPER BOT")
+    print(f"🚀 ÇOKLU LS FİLTRELİ SNIPER BOT")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 LS Filtreli Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 Çoklu LS Filtreli Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
