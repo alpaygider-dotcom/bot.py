@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (SIKILAŞTIRILDI)
+# AYARLAR (SIKILAŞTIRILDI + RS ZORUNLU)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -177,7 +177,7 @@ async def generate_report(session):
     await send_telegram(session, "\n".join(report_lines))
 
 # =========================================================
-# API (CancelledError yakalaması eklendi)
+# API
 # =========================================================
 async def fetch(session, url, params=None):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -188,10 +188,8 @@ async def fetch(session, url, params=None):
                 async with session.get(url, params=params, headers=headers, timeout=30) as resp:
                     if resp.status == 429:
                         retry_after = resp.headers.get("Retry-After", str(backoff))
-                        try:
-                            wait = int(retry_after)
-                        except ValueError:
-                            wait = backoff
+                        try: wait = int(retry_after)
+                        except ValueError: wait = backoff
                         print(f"⚠️ HTTP 429: {wait}s bekleniyor...")
                         await asyncio.sleep(wait)
                         backoff *= 2
@@ -318,7 +316,7 @@ def calculate_dynamic_volume_threshold(volumes):
     return threshold
 
 # =========================================================
-# SCAN COIN (SIKILAŞTIRILMIŞ)
+# SCAN COIN (RS ZORUNLU KAPI BEKÇİSİ)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                     btc_change, min_score, dynamic_min_volume,
@@ -405,6 +403,19 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
             if hh[-1] > hh[-2] and ll[-1] > ll[-2]:
                 bull_struct = True
 
+    # ========== RS HESAPLAMA (KAPI BEKÇİSİ) ==========
+    # RS = Coin momentum - BTC momentum
+    if len(closes) >= 12:
+        coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
+        rs = coin_mom - btc_change
+    else:
+        rs = 0.0
+
+    # ❗ RS ZORUNLU KAPI: RS > 0 değilse sinyal YOK
+    if rs <= 0:
+        return None
+
+    # ========== LONG SKORLAMA ==========
     score = 0
     reasons = []
     squeeze = False
@@ -450,11 +461,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if funding_rate < -0.008 and change_pct > 0:
         score += 2; squeeze = True; reasons.append("Squeeze")
 
-    rs = change_pct - btc_change
+    # RS bonusu (pozitif olduğu zaten garanti)
     if rs > 1.5:
-        score += 3; reasons.append(f"🚀 BTC üstünlük {rs:.2f}")
-    elif rs < -2.0:
-        score -= 3
+        score += 4; reasons.append(f"🚀 RS {rs:.2f}")
+    else:
+        score += 2; reasons.append(f"✅ RS {rs:.2f}")
 
     if heavy and len(kl_5m) > 6:
         r_high = max(float(k[2]) for k in kl_5m[-7:-2])
@@ -507,14 +518,14 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if speed > 1.5: categories.add("hacim")
     if taker_r > 0.58: categories.add("taker")
     if delta_r > 0.15: categories.add("delta")
-    if "RS" in "".join(reasons) or "BTC" in "".join(reasons): categories.add("rs")
+    if rs > 0: categories.add("rs")  # RS her zaman pozitif
     if bull_struct or (ema20_1h is not None and close_p > ema20_1h): categories.add("trend")
     if bb_lower is not None and close_p <= bb_mid: categories.add("bb")
     if macd_l is not None and sig_l is not None and macd_l > sig_l: categories.add("macd")
     if rsi is not None and 30 < rsi < 70: categories.add("rsi")
     if recent_volatility < older_volatility * 0.7: categories.add("squeeze_setup")
 
-    if len(categories) < 6:
+    if len(categories) < 5:  # RS garantilendiği için 6'dan 5'e indirildi
         return None
 
     if score < min_score: return None
@@ -540,11 +551,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 ULTRA SIKI SNIPER BOT ({len(TR_COIN_LIST)} coin)")
+    print(f"🚀 RS KAPILI SNIPER BOT ({len(TR_COIN_LIST)} coin)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 Ultra Sıkı Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 RS Kapılı Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
@@ -634,7 +645,7 @@ async def main():
                         (r['score'] * 0.35) +
                         (min(r['rel_vol'], 4) * 0.20) +
                         (abs(r['delta']) * 0.20) +
-                        (max(r['rs'], 0) * 0.15) +
+                        (r['rs'] * 0.15) +  # RS pozitif olduğu için direkt kullan
                         (max(r['oi'], 0) * 0.10 if r['oi'] != -999 else 0)
                     )
                 all_res.sort(key=lambda x: x['rank'], reverse=True)
@@ -655,11 +666,11 @@ async def main():
                             f"Giriş: {r['price']} | %{r['change']}\n"
                             f"🎯 TP: {r['tp']} (%{r['tp_pct']}) | 🛑 SL: {r['sl']} (%{r['sl_pct']})\n"
                             f"OI: {oi_str} | RelVol: {r['rel_vol']}x\n"
-                            f"RS: {r['rs']:.2f} | Funding: {r['funding']*100:.4f}%\n"
+                            f"🚀 RS: {r['rs']:.2f} | Funding: {r['funding']*100:.4f}%\n"
                             f"Delta: {r['delta']:.2f} | Sebep: {reasons}"
                         )
                         await send_telegram(session, msg)
-                        print(f"✅ {r['symbol']} LONG (Puan: {r['score']})")
+                        print(f"✅ {r['symbol']} LONG (Puan: {r['score']}, RS: {r['rs']:.2f})")
                         last_signals[r['symbol']] = now
                         signal_history.append(r['symbol'])
                         
@@ -667,7 +678,8 @@ async def main():
                             signal_tracker[r['symbol']] = {
                                 'price': r['price'],
                                 'time': now,
-                                'score': r['score']
+                                'score': r['score'],
+                                'rs': r['rs']
                             }
                         
                         sent += 1
