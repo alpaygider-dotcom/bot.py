@@ -19,6 +19,7 @@ if not BOT_TOKEN or not CHAT_ID:
 
 FAPI_URL = "https://fapi.binance.com"
 SPOT_TR_URL = "https://api.trbinance.com"
+SPOT_GLOBAL_URL = "https://api.binance.com"  # YEDEK
 
 # Önbellek süreleri (saniye)
 CACHE_5M = 35
@@ -196,11 +197,25 @@ def calculate_atr(highs, lows, closes, period=14):
     return mean(tr[-period:]) if tr else None
 
 # =========================================================
-# BINANCE TR SPOT LİSTESİ
+# SEMBOL LİSTESİ (ÖNCE TR, BAŞARISIZSA GLOBAL)
 # =========================================================
-async def get_spot_symbols_tr(session):
+async def get_spot_symbols(session):
+    """Önce Binance TR'yi dener, başarısız olursa Global Binance'e düşer."""
+    # 1. Binance TR dene
     info = await fetch_api(session, SPOT_TR_URL, "/api/v3/exchangeInfo")
+    if info:
+        symbols = {s["symbol"] for s in info.get("symbols", [])
+                   if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
+                   and s["symbol"] not in STABLECOIN_BLACKLIST}
+        if symbols:
+            await send_telegram(session, f"✅ Binance TR: {len(symbols)} coin taranacak.")
+            return symbols
+
+    # 2. Global Binance'e düş
+    await send_telegram(session, "⚠️ Binance TR API'sine erişilemedi. Global Binance üzerinden devam ediliyor.")
+    info = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/exchangeInfo")
     if not info:
+        await send_telegram(session, "❌ Global Binance API'sine de erişilemedi!")
         return set()
     return {s["symbol"] for s in info.get("symbols", [])
             if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
@@ -216,14 +231,17 @@ async def get_futures_symbols(session):
 
 async def get_daily_change_map(session, symbols):
     change_map = {}
-    data = await fetch_api(session, SPOT_TR_URL, "/api/v3/ticker/24hr")
-    if not data:
-        return change_map
-    for item in data:
-        sym = item.get("symbol", "")
-        if sym in symbols:
-            try: change_map[sym] = float(item["priceChangePercent"])
-            except: change_map[sym] = 0.0
+    # Önce TR spot, sonra global spot
+    for base in (SPOT_TR_URL, SPOT_GLOBAL_URL):
+        data = await fetch_api(session, base, "/api/v3/ticker/24hr")
+        if data:
+            for item in data:
+                sym = item.get("symbol", "")
+                if sym in symbols:
+                    try: change_map[sym] = float(item["priceChangePercent"])
+                    except: change_map[sym] = 0.0
+            if change_map:
+                break
     return change_map
 
 # =========================================================
@@ -402,10 +420,12 @@ async def main():
         asyncio.create_task(telegram_polling(session))
         await send_telegram(session, "🎯 Final Sentez Bot Başlatıldı. /status /stop /start /next /ping")
 
-        spot_symbols = await get_spot_symbols_tr(session)
+        spot_symbols = await get_spot_symbols(session)
         if not spot_symbols:
-            await send_telegram(session, "❌ Binance TR spot sembol listesi alınamadı!")
-            return
+            await send_telegram(session, "❌ Sembol listesi alınamadı, bot 60 saniye sonra tekrar deneyecek.")
+            await asyncio.sleep(60)
+            return  # Railway otomatik restart edecektir
+
         futures_set = await get_futures_symbols(session)
         COIN_LIST = sorted(spot_symbols)
         print(f"✅ {len(COIN_LIST)} coin taranacak. ({len(futures_set)} tanesi futures'ta var)")
