@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (SIKILAŞTIRILDI + RS ZORUNLU)
+# AYARLAR
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -38,6 +38,7 @@ CACHE_1H = 300
 CACHE_4H = 900
 CACHE_OI = 120
 CACHE_FUNDING = 300
+CACHE_LS = 120  # Long/Short ratio cache
 
 BATCH_SIZE = 25
 MAX_CONSECUTIVE_ERRORS = 15
@@ -55,6 +56,7 @@ EXCLUDE_FROM_VOLUME_CALC = {
 
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
 
+# XMR ÇIKARILDI
 TR_COIN_LIST = sorted([
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SOLUSDT", "AVAXUSDT",
     "DOTUSDT", "LINKUSDT", "UNIUSDT", "MATICUSDT", "SHIBUSDT", "DOGEUSDT",
@@ -87,11 +89,11 @@ TR_COIN_LIST = sorted([
     "TVKUSDT", "UNFIUSDT", "UTKUSDT", "VETUSDT", "VGXUSDT",
     "VIDTUSDT", "VITEUSDT", "VOXELUSDT", "VTHOUSDT", "WAVESUSDT", "WAXPUSDT",
     "WBTCUSDT", "WINUSDT", "WLDUSDT", "WOOUSDT", "WRXUSDT", "XECUSDT",
-    "XEMUSDT", "XLMUSDT", "XMRUSDT", "XTZUSDT", "XVGUSDT", "YGGUSDT"
+    "XEMUSDT", "XLMUSDT", "XTZUSDT", "XVGUSDT", "YGGUSDT"
 ])
 
 cache = {
-    "funding": {}, "oi": {},
+    "funding": {}, "oi": {}, "ls": {},
     "klines_5m": {}, "klines_15m": {}, "klines_1h": {}, "klines_4h": {}
 }
 last_signals = {}
@@ -143,7 +145,6 @@ async def telegram_polling(session):
         await asyncio.sleep(1)
 
 async def generate_report(session):
-    """Sinyal verilen coinlerin performans raporunu oluşturur."""
     if not signal_tracker:
         await send_telegram(session, "📊 Henüz takip edilen sinyal yok.")
         return
@@ -316,15 +317,17 @@ def calculate_dynamic_volume_threshold(volumes):
     return threshold
 
 # =========================================================
-# SCAN COIN (RS ZORUNLU KAPI BEKÇİSİ)
+# SCAN COIN (LONG/SHORT FİLTRESİ EKLENDİ)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                     btc_change, min_score, dynamic_min_volume,
                     klines_1h, klines_4h, klines_15m, daily_change):
     if symbol in last_signals and time.time() - last_signals[symbol] < COOLDOWN:
         return None
-    if daily_change is not None and daily_change > 10.0:
+    
+    if daily_change is not None and daily_change > 5.0:
         return None
+    
     if not kl_5m or len(kl_5m) < 30:
         return None
 
@@ -341,7 +344,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if len(closed) >= 13:
         price_1h_ago = float(closed[-13][4])
         hour_change = (close_p - price_1h_ago) / price_1h_ago * 100
-        if hour_change > 3.0: return None
+        if hour_change > 2.0: return None
 
     if quote_vol < dynamic_min_volume or abs(change_pct) > 8.0: return None
 
@@ -371,6 +374,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     oi_change = 0.0
     has_oi = False
     funding_rate = 0.0
+    ls_prev = None
+    ls_curr = None
+    ls_change = 0.0
+    
     if is_futures:
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
@@ -388,6 +395,17 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                                     "/fapi/v1/premiumIndex", {"symbol": symbol}, CACHE_FUNDING)
             if fund: funding_rate = float(fund.get("lastFundingRate", 0))
         except: pass
+        
+        # LONG/SHORT ORANI
+        try:
+            ls_data = await get_cached(session, "ls", symbol, FAPI_URL,
+                                       "/futures/data/globalLongShortAccountRatio",
+                                       {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS)
+            if ls_data and len(ls_data) >= 2:
+                ls_prev = float(ls_data[-2]["longShortRatio"])
+                ls_curr = float(ls_data[-1]["longShortRatio"])
+                ls_change = ((ls_curr - ls_prev) / ls_prev) * 100  # Yüzdesel değişim
+        except: pass
 
     ema20_1h = ema50_4h = None
     bull_struct = False
@@ -404,14 +422,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                 bull_struct = True
 
     # ========== RS HESAPLAMA (KAPI BEKÇİSİ) ==========
-    # RS = Coin momentum - BTC momentum
     if len(closes) >= 12:
         coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
         rs = coin_mom - btc_change
     else:
         rs = 0.0
 
-    # ❗ RS ZORUNLU KAPI: RS > 0 değilse sinyal YOK
     if rs <= 0:
         return None
 
@@ -461,11 +477,23 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if funding_rate < -0.008 and change_pct > 0:
         score += 2; squeeze = True; reasons.append("Squeeze")
 
-    # RS bonusu (pozitif olduğu zaten garanti)
+    # RS bonusu
     if rs > 1.5:
         score += 4; reasons.append(f"🚀 RS {rs:.2f}")
     else:
         score += 2; reasons.append(f"✅ RS {rs:.2f}")
+
+    # LONG/SHORT FİLTRESİ
+    if ls_curr is not None and ls_prev is not None:
+        if ls_change < 0:  # Short'lar artıyor → Short squeeze potansiyeli
+            if ls_change < -2:  # %2'den fazla düşüş
+                score += 3; reasons.append(f"📉 Short squeeze ({ls_prev:.1f}→{ls_curr:.1f})")
+            elif ls_change < -1:
+                score += 2; reasons.append(f"📉 LS düşüyor ({ls_prev:.1f}→{ls_curr:.1f})")
+            else:
+                score += 1; reasons.append(f"LS hafif düşüş")
+        else:  # Long'lar artıyor → aşırı kalabalık
+            score -= 1
 
     if heavy and len(kl_5m) > 6:
         r_high = max(float(k[2]) for k in kl_5m[-7:-2])
@@ -518,14 +546,14 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if speed > 1.5: categories.add("hacim")
     if taker_r > 0.58: categories.add("taker")
     if delta_r > 0.15: categories.add("delta")
-    if rs > 0: categories.add("rs")  # RS her zaman pozitif
+    if rs > 0: categories.add("rs")
     if bull_struct or (ema20_1h is not None and close_p > ema20_1h): categories.add("trend")
     if bb_lower is not None and close_p <= bb_mid: categories.add("bb")
     if macd_l is not None and sig_l is not None and macd_l > sig_l: categories.add("macd")
     if rsi is not None and 30 < rsi < 70: categories.add("rsi")
     if recent_volatility < older_volatility * 0.7: categories.add("squeeze_setup")
 
-    if len(categories) < 5:  # RS garantilendiği için 6'dan 5'e indirildi
+    if len(categories) < 5:
         return None
 
     if score < min_score: return None
@@ -536,12 +564,19 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     tp_pct = round((tp_price - close_p) / close_p * 100, 2)
     sl_pct = round((close_p - sl_price) / close_p * 100, 2)
 
+    # LS string oluştur
+    if ls_prev is not None and ls_curr is not None:
+        ls_str = f"{ls_prev:.1f}→{ls_curr:.1f} ({ls_change:+.1f}%)"
+    else:
+        ls_str = "N/A"
+
     return {
         "symbol": symbol, "score": score, "conf": conf,
         "price": round(close_p, 4), "change": round(change_pct, 2),
         "oi": round(oi_change, 2) if has_oi else -999,
         "funding": funding_rate, "delta": delta_r,
         "rel_vol": rel_vol, "squeeze": squeeze, "rs": round(rs, 2),
+        "ls": ls_str, "ls_change": ls_change,
         "tp": tp_price, "sl": sl_price, "tp_pct": tp_pct, "sl_pct": sl_pct,
         "reasons": reasons
     }
@@ -551,11 +586,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 RS KAPILI SNIPER BOT ({len(TR_COIN_LIST)} coin)")
+    print(f"🚀 LONG/SHORT FİLTRELİ SNIPER BOT")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 RS Kapılı Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 LS Filtreli Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
@@ -645,7 +680,7 @@ async def main():
                         (r['score'] * 0.35) +
                         (min(r['rel_vol'], 4) * 0.20) +
                         (abs(r['delta']) * 0.20) +
-                        (r['rs'] * 0.15) +  # RS pozitif olduğu için direkt kullan
+                        (r['rs'] * 0.15) +
                         (max(r['oi'], 0) * 0.10 if r['oi'] != -999 else 0)
                     )
                 all_res.sort(key=lambda x: x['rank'], reverse=True)
@@ -666,11 +701,12 @@ async def main():
                             f"Giriş: {r['price']} | %{r['change']}\n"
                             f"🎯 TP: {r['tp']} (%{r['tp_pct']}) | 🛑 SL: {r['sl']} (%{r['sl_pct']})\n"
                             f"OI: {oi_str} | RelVol: {r['rel_vol']}x\n"
-                            f"🚀 RS: {r['rs']:.2f} | Funding: {r['funding']*100:.4f}%\n"
-                            f"Delta: {r['delta']:.2f} | Sebep: {reasons}"
+                            f"🚀 RS: {r['rs']:.2f} | LS: {r['ls']}\n"
+                            f"Funding: {r['funding']*100:.4f}% | Delta: {r['delta']:.2f}\n"
+                            f"Sebep: {reasons}"
                         )
                         await send_telegram(session, msg)
-                        print(f"✅ {r['symbol']} LONG (Puan: {r['score']}, RS: {r['rs']:.2f})")
+                        print(f"✅ {r['symbol']} LONG (Puan: {r['score']}, RS: {r['rs']:.2f}, LS: {r['ls']})")
                         last_signals[r['symbol']] = now
                         signal_history.append(r['symbol'])
                         
@@ -679,7 +715,8 @@ async def main():
                                 'price': r['price'],
                                 'time': now,
                                 'score': r['score'],
-                                'rs': r['rs']
+                                'rs': r['rs'],
+                                'ls': r['ls']
                             }
                         
                         sent += 1
