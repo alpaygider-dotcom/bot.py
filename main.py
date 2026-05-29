@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR
+# AYARLAR - BURADAN DEĞİŞTİREBİLİRSİNİZ
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -17,10 +17,29 @@ if not BOT_TOKEN or not CHAT_ID:
     print("❌ BOT_TOKEN veya CHAT_ID ortam değişkeni eksik!")
     exit(1)
 
-FAPI_URL = "https://fapi.binance.com"
-SPOT_TR_URL = "https://api.trbinance.com"
-SPOT_GLOBAL_URL = "https://api.binance.com"
+# API URL'leri
+FAPI_URL = "https://fapi.binance.com"       # Binance Futures (Global)
+SPOT_TR_URL = "https://api.trbinance.com"   # Binance TR (sadece coin listesi)
+SPOT_GLOBAL_URL = "https://api.binance.com" # Binance Global (tüm veriler)
 
+# Tarama ayarları
+SCAN_INTERVAL = 40          # Taramalar arası saniye
+COOLDOWN = 600              # Aynı coinin tekrar sinyal verme süresi (10 dk)
+GLOBAL_COOLDOWN = 90        # Tüm coinler için bekleme süresi
+MAX_SIGNALS_PER_ROUND = 3   # Bir turda en fazla sinyal sayısı
+BATCH_SIZE = 25             # Async batch boyutu
+
+# Hacim ve skor filtreleri - BURADAN OYNAYIN
+MIN_QUOTE_VOLUME = 500_000  # Minimum 5dk hacmi (USDT). Daha fazla coin için düşürün: 200_000
+MIN_SCORE_BASE = 5          # Minimum skor. Daha fazla sinyal için düşürün: 3-4
+MIN_SCORE_HIGH_VOLATILITY = 7
+MIN_SCORE_LOW_VOLATILITY = 4
+
+# TP/SL çarpanları (ATR ile çarpılır)
+TP_MULT = 10                # Take-profit çarpanı. Daha büyük hedef için artırın: 12-15
+SL_MULT = 5                 # Stop-loss çarpanı. Daha geniş stop için artırın: 6-8
+
+# Önbellek süreleri (saniye)
 CACHE_5M = 35
 CACHE_15M = 180
 CACHE_1H = 300
@@ -28,21 +47,19 @@ CACHE_4H = 900
 CACHE_OI = 120
 CACHE_FUNDING = 300
 
-COOLDOWN = 600
-GLOBAL_COOLDOWN = 90
-MAX_SIGNALS_PER_ROUND = 3
-BATCH_SIZE = 25
 MAX_CONSECUTIVE_ERRORS = 15
-
 SEMAPHORE = asyncio.Semaphore(20)
 
+# Stablecoin kara listesi
 STABLECOIN_BLACKLIST = {
     "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT",
     "USDPUSDT", "FDUSDUSDT", "USTCUSDT", "EURSUSDT"
 }
 
-MAJOR_COINS = {"BTCUSDT", "ETHUSDT"}
+# Büyük coinler - bunlar için ekstra skor şartı
+MAJOR_COINS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
 
+# Global değişkenler
 cache = {
     "funding": {}, "oi": {},
     "klines_5m": {}, "klines_15m": {}, "klines_1h": {}, "klines_4h": {}
@@ -176,16 +193,16 @@ def calculate_bollinger(prices, period=20, std_dev=2):
     std = stdev(prices[-period:])
     return sma, sma + std_dev * std, sma - std_dev * std
 
-def calculate_atr(highs, lows, closes, period=14):
+def calculate_atr(highs, lows, closes, period=10):
     if len(highs) < period + 1: return None
     tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(highs))]
     return mean(tr[-period:])
 
 # =========================================================
-# SEMBOL LİSTESİ (TR liste, GLOBAL veri)
+# COIN LİSTESİ - SADECE BINANCE TR
 # =========================================================
 async def get_spot_symbols(session):
-    """TR'den coin listesini al, başarısız olursa GLOBAL."""
+    """SADECE Binance TR'den coin listesini al. Başarısız olursa None döndür."""
     info = await fetch_api(session, SPOT_TR_URL, "/api/v3/exchangeInfo")
     if info:
         syms = {s["symbol"] for s in info.get("symbols", [])
@@ -194,12 +211,9 @@ async def get_spot_symbols(session):
         if syms:
             await send_telegram(session, f"✅ Binance TR: {len(syms)} coin")
             return syms
-    await send_telegram(session, "⚠️ TR API yok, Global liste kullanılıyor.")
-    info = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/exchangeInfo")
-    if not info: return set()
-    return {s["symbol"] for s in info.get("symbols", [])
-            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
-            and s["symbol"] not in STABLECOIN_BLACKLIST}
+    # TR API çalışmazsa None dön, bot başlamasın
+    await send_telegram(session, "❌ Binance TR API'sine erişilemedi! Bot başlatılamadı.")
+    return None
 
 async def get_futures_symbols(session):
     info = await fetch_api(session, FAPI_URL, "/fapi/v1/exchangeInfo")
@@ -209,20 +223,9 @@ async def get_futures_symbols(session):
             and s.get("status") == "TRADING" and s["symbol"] not in STABLECOIN_BLACKLIST}
 
 async def get_daily_change_map(session, symbols):
-    """GLOBAL SPOT'tan ticker çek, TR'ye fallback."""
+    """GLOBAL SPOT'tan günlük değişimleri çek."""
     cmap = {}
-    # ÖNCE GLOBAL
     data = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/ticker/24hr")
-    if data:
-        for item in data:
-            s = item.get("symbol", "")
-            if s in symbols:
-                try: cmap[s] = float(item["priceChangePercent"])
-                except: cmap[s] = 0.0
-        if cmap:
-            return cmap
-    # YEDEK TR
-    data = await fetch_api(session, SPOT_TR_URL, "/api/v3/ticker/24hr")
     if data:
         for item in data:
             s = item.get("symbol", "")
@@ -232,7 +235,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (TÜM PROFESYONEL DÜZELTMELER)
+# SCAN COIN - TÜM PROFESYONEL FİLTRELER
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                     btc_change, min_score, klines_1h, klines_4h, klines_15m, daily_change):
@@ -258,8 +261,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if len(closed) >= 13:
         if (close_p - float(closed[-13][4])) / float(closed[-13][4]) * 100 > 8.0: return None
 
-    # Volume filtresi - 750K USDT
-    if quote_vol < 750_000 or abs(change_pct) > 8.0: return None
+    # Hacim filtresi - MIN_QUOTE_VOLUME kullan
+    if quote_vol < MIN_QUOTE_VOLUME or abs(change_pct) > 8.0: return None
 
     # RelVol - kendi geçmişine göre
     prev_vols = [float(k[5]) for k in kl_5m[-7:-2]]
@@ -321,14 +324,17 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
             if hh[-1] > hh[-2] and ll[-1] > ll[-2]:
                 bull_struct = True
 
-    # ========== LONG SKORLAMA ==========
+    # ========== LONG SKORLAMA (HACİM BAZLI DİNAMİK PUAN) ==========
     score = 0
     reasons = []
     squeeze = False
 
-    # Hacim patlaması
+    # Hacim patlaması - hacme göre puan
     if speed > 1.5 and change_pct > 0:
         score += 2; reasons.append("Hacim")
+        # Yüksek hacme ekstra puan
+        if speed > 3.0: score += 2; reasons[-1] = "💪 Büyük hacim"
+        elif speed > 2.0: score += 1
 
     # Normalize hareket
     if high > low:
@@ -397,23 +403,21 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
         score += 2; reasons.append("BB")
 
     # Majör coinler için ekstra skor şartı
-    if symbol in MAJOR_COINS and score < (min_score + 2):
+    if symbol in MAJOR_COINS and score < (min_score + 3):
         return None
 
     if score < min_score: return None
 
-    conf = min(95, 55 + score * 4)
-    tp_mult = max(8, min(15, 10 + rel_vol))
-    sl_mult = max(4, min(7, 5 + rel_vol * 0.5))
-    tp_price = round(close_p + atr_val * tp_mult, 4)
-    sl_price = round(close_p - atr_val * sl_mult, 4)
+    conf = min(95, 50 + score * 4)
+    tp_price = round(close_p + atr_val * TP_MULT, 4)
+    sl_price = round(close_p - atr_val * SL_MULT, 4)
     tp_pct = round((tp_price - close_p) / close_p * 100, 2)
     sl_pct = round((close_p - sl_price) / close_p * 100, 2)
 
     return {
         "symbol": symbol, "score": score, "conf": conf,
         "price": round(close_p, 4), "change": round(change_pct, 2),
-        "oi": round(oi_change, 2) if has_oi else -999,  # -999 = N/A
+        "oi": round(oi_change, 2) if has_oi else -999,
         "funding": funding_rate, "delta": delta_r,
         "rel_vol": rel_vol, "squeeze": squeeze, "rs": round(rs, 2),
         "tp": tp_price, "sl": sl_price, "tp_pct": tp_pct, "sl_pct": sl_pct,
@@ -425,19 +429,19 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print("🚀 PROFESYONEL SNIPER BOT (Tüm Düzeltmeler)")
+    print("🚀 BINANCE TR SNIPER BOT (Hacim Duyarlı)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, "🎯 Sniper Bot hazır. /ping /status /stop /start /next")
+        await send_telegram(session, "🎯 Binance TR Sniper Bot başlatıldı")
 
         spot_symbols = await get_spot_symbols(session)
         if not spot_symbols:
-            await send_telegram(session, "❌ Sembol listesi alınamadı.")
+            await send_telegram(session, "❌ Binance TR API'si çalışmıyor. Bot başlatılamadı.")
             return
         futures_set = await get_futures_symbols(session)
         COIN_LIST = sorted(spot_symbols)
-        print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
+        print(f"✅ {len(COIN_LIST)} TR coin taranıyor ({len(futures_set)} futures'ta var)")
 
         last_global = 0
 
@@ -460,8 +464,8 @@ async def main():
                     bl = [float(k[3]) for k in btc[-5:]]
                     btc_atr_pct = ((max(bh) - min(bl)) / min(bl)) * 100
 
-                # PROFESYONEL MIN SCORE (6-8)
-                min_score = 6 if btc_atr_pct < 1.0 else (8 if btc_atr_pct > 2.5 else 7)
+                # Adaptif minimum skor
+                min_score = MIN_SCORE_LOW_VOLATILITY if btc_atr_pct < 1.0 else (MIN_SCORE_HIGH_VOLATILITY if btc_atr_pct > 2.5 else MIN_SCORE_BASE)
 
                 fut_list = [s for s in COIN_LIST if s in futures_set]
 
@@ -478,7 +482,7 @@ async def main():
                 k4 = {s: r for s, r in zip(fut_list, r4) if r is not None}
                 k15 = {s: r for s, r in zip(fut_list, r15) if r is not None}
 
-                # 5m verileri - GLOBAL SPOT
+                # 5m verileri - GLOBAL SPOT'tan
                 tasks_5m = []
                 for s in COIN_LIST:
                     base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
