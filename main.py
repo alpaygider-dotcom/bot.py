@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR - BURADAN DEĞİŞTİREBİLİRSİNİZ
+# AYARLAR
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -17,29 +17,27 @@ if not BOT_TOKEN or not CHAT_ID:
     print("❌ BOT_TOKEN veya CHAT_ID ortam değişkeni eksik!")
     exit(1)
 
-# API URL'leri
 FAPI_URL = "https://fapi.binance.com"       # Binance Futures (Global)
-SPOT_TR_URL = "https://api.trbinance.com"   # Binance TR (sadece coin listesi)
-SPOT_GLOBAL_URL = "https://api.binance.com" # Binance Global (tüm veriler)
+SPOT_GLOBAL_URL = "https://api.binance.com" # Binance Global (ana veri kaynağı)
 
 # Tarama ayarları
-SCAN_INTERVAL = 40          # Taramalar arası saniye
-COOLDOWN = 600              # Aynı coinin tekrar sinyal verme süresi (10 dk)
-GLOBAL_COOLDOWN = 90        # Tüm coinler için bekleme süresi
-MAX_SIGNALS_PER_ROUND = 3   # Bir turda en fazla sinyal sayısı
-BATCH_SIZE = 25             # Async batch boyutu
+SCAN_INTERVAL = 40
+COOLDOWN = 600
+GLOBAL_COOLDOWN = 90
+MAX_SIGNALS_PER_ROUND = 3
+BATCH_SIZE = 25
 
-# Hacim ve skor filtreleri - BURADAN OYNAYIN
-MIN_QUOTE_VOLUME = 500_000  # Minimum 5dk hacmi (USDT). Daha fazla coin için düşürün: 200_000
-MIN_SCORE_BASE = 5          # Minimum skor. Daha fazla sinyal için düşürün: 3-4
+# Hacim ve skor filtreleri
+MIN_QUOTE_VOLUME = 500_000
+MIN_SCORE_BASE = 5
 MIN_SCORE_HIGH_VOLATILITY = 7
 MIN_SCORE_LOW_VOLATILITY = 4
 
-# TP/SL çarpanları (ATR ile çarpılır)
-TP_MULT = 10                # Take-profit çarpanı. Daha büyük hedef için artırın: 12-15
-SL_MULT = 5                 # Stop-loss çarpanı. Daha geniş stop için artırın: 6-8
+# TP/SL çarpanları
+TP_MULT = 10
+SL_MULT = 5
 
-# Önbellek süreleri (saniye)
+# Önbellek süreleri
 CACHE_5M = 35
 CACHE_15M = 180
 CACHE_1H = 300
@@ -50,16 +48,28 @@ CACHE_FUNDING = 300
 MAX_CONSECUTIVE_ERRORS = 15
 SEMAPHORE = asyncio.Semaphore(20)
 
-# Stablecoin kara listesi
 STABLECOIN_BLACKLIST = {
     "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT",
     "USDPUSDT", "FDUSDUSDT", "USTCUSDT", "EURSUSDT"
 }
 
-# Büyük coinler - bunlar için ekstra skor şartı
 MAJOR_COINS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
 
-# Global değişkenler
+# =========================================================
+# BINANCE TR SPOT LİSTESİ (GÜNCEL)
+# =========================================================
+TR_COIN_LIST = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SOLUSDT", "AVAXUSDT",
+    "DOTUSDT", "LINKUSDT", "UNIUSDT", "MATICUSDT", "SHIBUSDT", "DOGEUSDT",
+    "LTCUSDT", "TRXUSDT", "ATOMUSDT", "NEARUSDT", "ALGOUSDT", "FTMUSDT",
+    "SANDUSDT", "MANAUSDT", "AXSUSDT", "GALAUSDT", "CHZUSDT", "ENJUSDT",
+    "HOTUSDT", "ZILUSDT", "BATUSDT", "CELOUSDT", "COMPUSDT", "CRVUSDT",
+    "DYDXUSDT", "EGLDUSDT", "FLOWUSDT", "GRTUSDT", "ICPUSDT", "KSMUSDT",
+    "LRUSDT", "MKRUSDT", "OMGUSDT", "QNTUSDT", "RENUSDT", "RSRUSDT",
+    "SKLUSDT", "SNXUSDT", "STORJUSDT", "SUSHIUSDT", "SXPUSDT", "UMAUSDT",
+    "YFIUSDT", "ZECUSDT", "ZENUSDT", "ZRXUSDT", "1INCHUSDT"
+]
+
 cache = {
     "funding": {}, "oi": {},
     "klines_5m": {}, "klines_15m": {}, "klines_1h": {}, "klines_4h": {}
@@ -199,21 +209,11 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:])
 
 # =========================================================
-# COIN LİSTESİ - SADECE BINANCE TR
+# COIN LİSTESİ - SADECE TR'DEKİ COINLER
 # =========================================================
 async def get_spot_symbols(session):
-    """SADECE Binance TR'den coin listesini al. Başarısız olursa None döndür."""
-    info = await fetch_api(session, SPOT_TR_URL, "/api/v3/exchangeInfo")
-    if info:
-        syms = {s["symbol"] for s in info.get("symbols", [])
-                if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
-                and s["symbol"] not in STABLECOIN_BLACKLIST}
-        if syms:
-            await send_telegram(session, f"✅ Binance TR: {len(syms)} coin")
-            return syms
-    # TR API çalışmazsa None dön, bot başlamasın
-    await send_telegram(session, "❌ Binance TR API'sine erişilemedi! Bot başlatılamadı.")
-    return None
+    """Binance TR listesini sabit olarak döndür (TR API'sine gitmez)."""
+    return set(TR_COIN_LIST)
 
 async def get_futures_symbols(session):
     info = await fetch_api(session, FAPI_URL, "/fapi/v1/exchangeInfo")
@@ -254,17 +254,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     )
     change_pct = ((close_p - open_p) / open_p) * 100
 
-    # Stablecoin filtresi
     if 0.99 < close_p < 1.01 and abs(change_pct) < 0.1: return None
-
-    # 1 saatte %8'den fazla yükseleni ele
     if len(closed) >= 13:
         if (close_p - float(closed[-13][4])) / float(closed[-13][4]) * 100 > 8.0: return None
 
-    # Hacim filtresi - MIN_QUOTE_VOLUME kullan
     if quote_vol < MIN_QUOTE_VOLUME or abs(change_pct) > 8.0: return None
 
-    # RelVol - kendi geçmişine göre
     prev_vols = [float(k[5]) for k in kl_5m[-7:-2]]
     avg_vol = mean(prev_vols) if prev_vols else vol
     speed = vol / avg_vol if avg_vol > 0 else 0
@@ -287,7 +282,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     macd_l, sig_l, hist = calculate_real_macd(closes)
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
 
-    # OI - DOĞRU ENDPOINT, OPSİYONEL
     oi_change = 0.0
     has_oi = False
     funding_rate = 0.0
@@ -309,7 +303,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
             if fund: funding_rate = float(fund.get("lastFundingRate", 0))
         except: pass
 
-    # Trend
     ema20_1h = ema50_4h = None
     bull_struct = False
     if symbol in klines_1h and klines_1h[symbol] is not None:
@@ -324,33 +317,26 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
             if hh[-1] > hh[-2] and ll[-1] > ll[-2]:
                 bull_struct = True
 
-    # ========== LONG SKORLAMA (HACİM BAZLI DİNAMİK PUAN) ==========
     score = 0
     reasons = []
     squeeze = False
 
-    # Hacim patlaması - hacme göre puan
     if speed > 1.5 and change_pct > 0:
         score += 2; reasons.append("Hacim")
-        # Yüksek hacme ekstra puan
         if speed > 3.0: score += 2; reasons[-1] = "💪 Büyük hacim"
         elif speed > 2.0: score += 1
 
-    # Normalize hareket
     if high > low:
         norm = change_pct / ((high - low) / close_p * 100) if ((high - low) / close_p * 100) > 0 else 0
         if 0.1 < norm < 5 and norm > 0:
             score += 2; reasons.append("Norm")
 
-    # Taker ve Delta
     if taker_r > 0.55: score += 2; reasons.append("Taker")
     if delta_r > 0.12: score += 2; reasons.append("Delta")
 
-    # Funding squeeze
     if funding_rate < -0.005 and change_pct > 0:
         score += 2; squeeze = True; reasons.append("Squeeze")
 
-    # GERÇEK RS: coin momentum - btc momentum
     if len(closes) >= 12:
         coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
         rs = coin_mom - btc_change
@@ -358,7 +344,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     else:
         rs = 0.0
 
-    # Sıkışma kırılımı
     if heavy and len(kl_5m) > 6:
         r_high = max(float(k[2]) for k in kl_5m[-7:-2])
         r_low = min(float(k[3]) for k in kl_5m[-7:-2])
@@ -366,43 +351,33 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
         if comp < 1.5 and speed > 1.5 and delta_r > 0.1:
             score += 3; reasons.append("Kırılım")
 
-    # BTC'ye rağmen güçlü - sadece OI varsa
     if has_oi and btc_change <= 0 and oi_change > 2 and delta_r > 0.15:
         score += 3; reasons.append("BTC↓ güçlü")
 
-    # Trend
     if ema20_1h is not None and close_p > ema20_1h: score += 1; reasons.append("1h↑")
     if ema50_4h is not None and close_p > ema50_4h: score += 2; reasons.append("4h↑")
     if bull_struct: score += 2; reasons.append("15m↑")
 
-    # RelVol
     if rel_vol > 1.5: score += 2; reasons.append("RelVol")
     elif rel_vol > 1.2: score += 1
 
-    # Wick cezası
     if wick_r > 0.6: score -= 1
 
-    # BTC etkisi
     if btc_change <= -0.8: score -= 4; reasons.append("BTC↓")
     if btc_change > 1.5 and symbol != "BTCUSDT": score -= 2
 
-    # Multi-TF uyumu
     if ema50_4h is not None and ema20_1h is not None and close_p > ema50_4h and close_p > ema20_1h and bull_struct:
         score += 3; reasons.append("MTF")
 
-    # RSI
     if rsi is not None and 30 < rsi < 70 and close_p > open_p:
         score += 1; reasons.append(f"RSI{rsi:.0f}")
 
-    # MACD
     if macd_l is not None and sig_l is not None and macd_l > sig_l and hist > 0:
         score += 2; reasons.append("MACD")
 
-    # Bollinger
     if bb_lower is not None and close_p <= bb_lower * 1.02 and change_pct > 0:
         score += 2; reasons.append("BB")
 
-    # Majör coinler için ekstra skor şartı
     if symbol in MAJOR_COINS and score < (min_score + 3):
         return None
 
@@ -429,16 +404,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print("🚀 BINANCE TR SNIPER BOT (Hacim Duyarlı)")
+    print(f"🚀 BINANCE TR SNIPER BOT (Sabit Liste, {len(TR_COIN_LIST)} coin)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, "🎯 Binance TR Sniper Bot başlatıldı")
+        await send_telegram(session, f"🎯 Binance TR Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin)")
 
         spot_symbols = await get_spot_symbols(session)
-        if not spot_symbols:
-            await send_telegram(session, "❌ Binance TR API'si çalışmıyor. Bot başlatılamadı.")
-            return
         futures_set = await get_futures_symbols(session)
         COIN_LIST = sorted(spot_symbols)
         print(f"✅ {len(COIN_LIST)} TR coin taranıyor ({len(futures_set)} futures'ta var)")
@@ -464,12 +436,10 @@ async def main():
                     bl = [float(k[3]) for k in btc[-5:]]
                     btc_atr_pct = ((max(bh) - min(bl)) / min(bl)) * 100
 
-                # Adaptif minimum skor
                 min_score = MIN_SCORE_LOW_VOLATILITY if btc_atr_pct < 1.0 else (MIN_SCORE_HIGH_VOLATILITY if btc_atr_pct > 2.5 else MIN_SCORE_BASE)
 
                 fut_list = [s for s in COIN_LIST if s in futures_set]
 
-                # Toplu cache
                 tasks_1h = [get_cached(session, "klines_1h", s, FAPI_URL, "/fapi/v1/klines",
                                        {"symbol": s, "interval": "1h", "limit": 20}, CACHE_1H) for s in fut_list]
                 tasks_4h = [get_cached(session, "klines_4h", s, FAPI_URL, "/fapi/v1/klines",
@@ -482,7 +452,6 @@ async def main():
                 k4 = {s: r for s, r in zip(fut_list, r4) if r is not None}
                 k15 = {s: r for s, r in zip(fut_list, r15) if r is not None}
 
-                # 5m verileri - GLOBAL SPOT'tan
                 tasks_5m = []
                 for s in COIN_LIST:
                     base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
