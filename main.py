@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (DENGELENDİ)
+# AYARLAR (DENGELENDİ + LS DÜZELTİLDİ)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -25,7 +25,6 @@ COOLDOWN = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 2
 
-# Minimum skorlar düşürüldü
 MIN_SCORE_BASE = 8
 MIN_SCORE_HIGH_VOLATILITY = 10
 MIN_SCORE_LOW_VOLATILITY = 6
@@ -40,8 +39,8 @@ CACHE_1H = 300
 CACHE_4H = 900
 CACHE_OI = 120
 CACHE_FUNDING = 300
-CACHE_LS_5M = 120
-CACHE_LS_1H = 600
+CACHE_LS_5M = 60   # DAHA KISA CACHE
+CACHE_LS_1H = 300
 CACHE_LS_6H = 1800
 CACHE_LS_12H = 3600
 
@@ -306,26 +305,11 @@ async def get_daily_change_map(session, symbols):
                 except: cmap[s] = 0.0
     return cmap
 
-def calculate_dynamic_volume_threshold(volumes):
-    if not volumes:
-        return 150_000
-    sorted_vols = sorted(volumes)
-    n = len(sorted_vols)
-    if n >= 10:
-        trimmed = sorted_vols[n//10:-n//10]
-    else:
-        trimmed = sorted_vols
-    if not trimmed:
-        return 150_000
-    med = median(trimmed)
-    threshold = max(150_000, min(800_000, med * 0.40))
-    return threshold
-
 # =========================================================
-# SCAN COIN (DENGELİ ERKEN UYARI)
+# SCAN COIN (LS DÜZELTİLDİ + COIN BAZLI HACİM)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
-                    btc_change, min_score, dynamic_min_volume,
+                    btc_change, min_score,
                     klines_1h, klines_4h, klines_15m, daily_change):
     if symbol in last_signals and time.time() - last_signals[symbol] < COOLDOWN:
         return None
@@ -351,7 +335,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         hour_change = (close_p - price_1h_ago) / price_1h_ago * 100
         if hour_change > 2.0: return None
 
-    if quote_vol < dynamic_min_volume or abs(change_pct) > 8.0: return None
+    # COIN BAZLI HACİM FİLTRESİ
+    vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
+    coin_median_vol = median(vol_history) if vol_history else vol
+    min_quote_vol_coin = max(150_000, coin_median_vol * 0.20)
+    
+    if quote_vol < min_quote_vol_coin or abs(change_pct) > 8.0: return None
 
     prev_vols = [float(k[5]) for k in kl_5m[-7:-2]]
     avg_vol = mean(prev_vols) if prev_vols else vol
@@ -409,6 +398,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             if fund: funding_rate = float(fund.get("lastFundingRate", 0))
         except: pass
 
+        # LS VERİSİ DÜZELTİLDİ
         try:
             ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
                                     "/futures/data/globalLongShortAccountRatio",
@@ -466,7 +456,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     else:
         rs = 0.0
 
-    if rs <= 0.1:  # Gevşetildi
+    if rs <= 0.1:
         return None
 
     # ========== LONG SKORLAMA (DENGELİ) ==========
@@ -474,19 +464,19 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     reasons = []
     squeeze = False
 
-    # 1. Volume Acceleration (EN KRİTİK)
+    # 1. Volume Acceleration
     if len(closed) >= 13:
         recent_3 = mean([float(k[5]) for k in closed[-3:]])
         older_10 = mean([float(k[5]) for k in closed[-13:-3]])
         vol_acceleration = recent_3 / older_10 if older_10 > 0 else 0
-        if vol_acceleration > 1.8:  # 2.2 → 1.8
+        if vol_acceleration > 1.8:
             score += 4
             reasons.append("🚀 Vol Acceleration")
 
     # 2. 1m Early Momentum
     if kl_1m and len(kl_1m) >= 5:
         m1_change = ((float(kl_1m[-1][4]) - float(kl_1m[-5][1])) / float(kl_1m[-5][1])) * 100
-        if m1_change > 0.5:  # 0.7 → 0.5
+        if m1_change > 0.5:
             score += 3
             reasons.append("⚡ 1m Momentum")
 
@@ -494,13 +484,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     prev_low = min([float(k[3]) for k in closed[-6:-1]])
     liquidity_sweep = (low < prev_low and close_p > prev_low and delta_r > 0.15)
     if liquidity_sweep:
-        score += 4  # 5 → 4
+        score += 4
         reasons.append("🩸 Liquidity Sweep")
 
     # 4. Bid Absorption Detection
     absorption = (close_p >= open_p and lower_wick > 0.35 and delta_r > 0.18 and taker_r > 0.58)
     if absorption:
-        score += 4  # 5 → 4
+        score += 4
         reasons.append("🧲 Bid Absorption")
 
     # 5. Relative Strength Momentum Curve
@@ -512,13 +502,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             coin_ret = ((c_now - c_prev) / c_prev) * 100
             recent_rs.append(coin_ret - btc_change)
         rs_trend = mean(recent_rs) if recent_rs else 0
-        if rs_trend > 0.1:  # 0.15 → 0.1
-            score += 3  # 4 → 3
+        if rs_trend > 0.1:
+            score += 3
             reasons.append("📈 RS Trend")
 
     # 6. Funding + OI Kombosu
     if funding_rate < -0.01 and oi_change > 4 and rs > 1:
-        score += 5  # 6 → 5
+        score += 5
         reasons.append("💣 Aggressive Positioning")
 
     # 7. Volume Dry-Up → Expansion
@@ -527,17 +517,17 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         recent_vol = mean([float(k[5]) for k in closed[-5:]])
         dryup = recent_vol < older_vol * 0.55
         if dryup and speed > 2:
-            score += 4  # 5 → 4
+            score += 4
             reasons.append("🌪 Vol Expansion")
 
     # 8. Whale Candle Recognition
     whale_candle = (body_r > 0.7 and taker_r > 0.65 and delta_r > 0.25 and speed > 2)
     if whale_candle:
-        score += 5  # 6 → 5
+        score += 5
         reasons.append("🐋 Whale Candle")
 
     # 9. Bollinger Bant Daralması
-    if bb_width < 0.015:  # 0.01 → 0.015
+    if bb_width < 0.015:
         score += 3
         reasons.append("🎯 Sıkışma/Patlama Öncesi")
 
@@ -659,7 +649,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if dryup: categories.add("dryup")
     if whale_candle: categories.add("whale")
 
-    if len(categories) < 4:  # 5 → 4
+    if len(categories) < 4:
         return None
 
     if score < min_score: return None
@@ -688,11 +678,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 DENGELİ ERKEN UYARI SNIPER BOT ({len(TR_COIN_LIST)} coin)")
+    print(f"🚀 LS DÜZELTİLDİ + COIN BAZLI HACİM")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 Dengeli Erken Uyarı Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 LS Düzeltilmiş Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
@@ -756,31 +746,24 @@ async def main():
 
                 valid = {}
                 vols = []
-                altcoin_volumes = []
 
                 for s, r in zip(COIN_LIST, resp_5m):
                     if r and len(r) >= 30:
                         valid[s] = r
                         try:
-                            vol_val = float(r[-2][5])
-                            vols.append(vol_val)
-                            if s not in EXCLUDE_FROM_VOLUME_CALC:
-                                quote_vol = float(r[-2][7])
-                                altcoin_volumes.append(quote_vol)
+                            float(r[-2][5])
+                            vols.append(float(r[-2][5]))
                         except: pass
 
                 fvols = [v for v in vols if v > 100000]
                 market_median = median(sorted(fvols)[2:-2]) if len(fvols) > 4 else (median(fvols) if fvols else 1)
-
-                dynamic_min_volume = calculate_dynamic_volume_threshold(altcoin_volumes)
-                print(f"📊 Dinamik hacim eşiği: {dynamic_min_volume:.0f} USDT (Altcoin: {len(altcoin_volumes)})")
 
                 scan_tasks = []
                 for s in COIN_LIST:
                     if s not in valid: continue
                     kl_1m = k1m.get(s) if s in futures_set else None
                     scan_tasks.append(scan_coin(session, s, s in futures_set, valid[s], kl_1m, market_median,
-                                                btc_change, min_score, dynamic_min_volume,
+                                                btc_change, min_score,
                                                 k1, k4, k15, daily_map.get(s)))
 
                 all_res = []
