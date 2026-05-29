@@ -245,7 +245,7 @@ async def get_daily_change_map(session, symbols):
     return change_map
 
 # =========================================================
-# SCAN COIN (TÜM PROFESYONEL FİLTRELER KORUNDU)
+# SCAN COIN (TÜM PROFESYONEL FİLTRELER + GENİŞ TP/SL + DÜŞÜK SKOR)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
                     btc_change, min_score_atr, klines_1h_cache, klines_4h_cache, klines_15m_cache, daily_change):
@@ -297,21 +297,32 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     macd_line, signal_line, histogram = calculate_real_macd(closes)
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
 
-    # OI / Funding (tüm futures coinler için, cache ile)
+    # OI / Funding (tüm futures coinler için, cache ile, hata ayıklamalı)
     oi_change = 0.0
     funding_rate = 0.0
     if is_futures:
-        oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
-                                   "/fapi/v1/openInterestHist",
-                                   {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
-        if oi_data and len(oi_data) >= 2:
-            prev_oi = float(oi_data[-2]["sumOpenInterestValue"])
-            curr_oi = float(oi_data[-1]["sumOpenInterestValue"])
-            if prev_oi > 0: oi_change = round(((curr_oi - prev_oi) / prev_oi) * 100, 2)
+        try:
+            oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
+                                       "/fapi/v1/openInterestHist",
+                                       {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
+            if oi_data and len(oi_data) >= 2:
+                prev_oi = float(oi_data[-2]["sumOpenInterestValue"])
+                curr_oi = float(oi_data[-1]["sumOpenInterestValue"])
+                if prev_oi > 0:
+                    oi_change = ((curr_oi - prev_oi) / prev_oi) * 100
+                else:
+                    # prev_oi sıfırsa, en azından curr_oi'yi göster
+                    oi_change = curr_oi
+        except Exception as e:
+            print(f"OI çekme hatası ({symbol}): {e}")
 
-        funding = await get_cached(session, "funding", symbol, FAPI_URL,
-                                   "/fapi/v1/premiumIndex", {"symbol": symbol}, CACHE_FUNDING)
-        if funding: funding_rate = float(funding.get("lastFundingRate", 0))
+        try:
+            funding = await get_cached(session, "funding", symbol, FAPI_URL,
+                                       "/fapi/v1/premiumIndex", {"symbol": symbol}, CACHE_FUNDING)
+            if funding:
+                funding_rate = float(funding.get("lastFundingRate", 0))
+        except Exception as e:
+            print(f"Funding çekme hatası ({symbol}): {e}")
 
     # Trend (cache'ten)
     ema20_1h = ema50_4h = None
@@ -396,35 +407,35 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
 
     confidence = min(95, 45 + int(long_score * 3))
 
-    # Spot uyumlu TP/SL
-    tp_mult = max(4.0, min(10.0, 5.0 + rel_vol * 0.5))
-    sl_mult = max(2.0, min(5.0, 2.5 + rel_vol * 0.3))
+    # GENİŞ TP/SL (SPOT İÇİN UYGUN)
+    tp_mult = max(8.0, min(15.0, 10.0 + rel_vol * 1.0))
+    sl_mult = max(4.0, min(7.0, 5.0 + rel_vol * 0.5))
     sl_price = round(close_price - atr_val * sl_mult, 4)
     tp_price = round(close_price + atr_val * tp_mult, 4)
 
     return {
         "symbol": symbol, "direction": "LONG", "score": long_score, "confidence": confidence,
-        "price": round(close_price, 4), "change": round(change_pct, 2), "oi": oi_change,
+        "price": round(close_price, 4), "change": round(change_pct, 2), "oi": round(oi_change, 2),
         "funding": funding_rate, "delta": delta_ratio, "rel_vol": rel_vol, "trend": "Bullish",
         "squeeze": squeeze, "rs": round(rs, 1), "sl": sl_price, "tp": tp_price, "reasons": reasons
     }
 
 # =========================================================
-# MAIN (HATA SAYACI VE SENTEZ EKLENDİ)
+# MAIN (HATA SAYACI VE DÜŞÜK SKOR)
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print("🚀 FİNAL SENTEZ BOT (Tüm Profesyonel Filtreler + Hata Koruması)")
+    print("🚀 NİHAİ BOT (DÜŞÜK SKOR + GENİŞ TP/SL + OI TAMİR)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, "🎯 Final Sentez Bot Başlatıldı. /status /stop /start /next /ping")
+        await send_telegram(session, "🎯 Nihai Bot Başlatıldı. /status /stop /start /next /ping")
 
         spot_symbols = await get_spot_symbols(session)
         if not spot_symbols:
             await send_telegram(session, "❌ Sembol listesi alınamadı, bot 60 saniye sonra tekrar deneyecek.")
             await asyncio.sleep(60)
-            return  # Railway otomatik restart edecektir
+            return
 
         futures_set = await get_futures_symbols(session)
         COIN_LIST = sorted(spot_symbols)
@@ -451,7 +462,13 @@ async def main():
                     btc_highs = [float(k[2]) for k in btc_klines[-5:]]; btc_lows = [float(k[3]) for k in btc_klines[-5:]]
                     btc_atr_percent = ((max(btc_highs) - min(btc_lows)) / min(btc_lows)) * 100
 
-                min_score_atr = 7 if btc_atr_percent < 1.0 else (9 if btc_atr_percent > 2.5 else 8)
+                # DÜŞÜK SKOR EŞİĞİ (4-6 arası adaptif)
+                if btc_atr_percent < 1.0:
+                    min_score_atr = 4
+                elif btc_atr_percent > 2.5:
+                    min_score_atr = 6
+                else:
+                    min_score_atr = 5
 
                 futures_list = [s for s in COIN_LIST if s in futures_set]
 
