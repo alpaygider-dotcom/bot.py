@@ -36,20 +36,18 @@ last_signals = {}
 # =========================================================
 async def send_telegram(session, coin):
     try:
-        emoji = "🟢" if coin['direction'] == "LONG" else "🔴"
-        squeeze_tag = "🔥 SQUEEZE " if coin.get("squeeze") else ""
-
         tp = f"{coin['tp']:.4f}" if coin.get('tp') is not None else "N/A"
         sl = f"{coin['sl']:.4f}" if coin.get('sl') is not None else "N/A"
+        squeeze_tag = "🔥 SQUEEZE " if coin.get("squeeze") else ""
 
         msg = (
-            f"{emoji} *{squeeze_tag}{coin['symbol']} ({coin['direction']})*\n"
+            f"🟢 *{squeeze_tag}{coin['symbol']} (LONG)*\n"
             f"Puan: {coin['score']} | Güven: %{coin['confidence']}\n"
             f"Giriş: {coin['price']} | %{coin['change']}\n"
             f"🎯 TP: {tp} | 🛑 SL: {sl}\n"
             f"OI: %{coin['oi']} | RelVol: {coin['rel_vol']}x\n"
             f"RS: {coin.get('rs', 0):.1f} | Funding: {coin['funding']*100:.4f}%\n"
-            f"Delta: {coin['delta']:.2f} | Trend: {'📈' if coin['trend'] == 'Bullish' else '📉'}"
+            f"Delta: {coin['delta']:.2f} | Trend: 📈"
         )
 
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -101,7 +99,7 @@ def calculate_atr(highs, lows, closes, period=14):
     return mean(tr[-period:]) if tr else None
 
 # =========================================================
-# 24 SAATLİK DEĞİŞİM HARİTASI (tek istek ile tüm coinler)
+# 24 SAATLİK DEĞİŞİM HARİTASI
 # =========================================================
 async def get_daily_change_map(session, is_futures=True):
     url_type = "fapi" if is_futures else "spot"
@@ -144,7 +142,7 @@ async def get_all_symbols_combined(session):
     return all_syms, futures_symbols
 
 # =========================================================
-# SCAN COIN (günlük %10 filtresi + ATR garanti)
+# SCAN COIN (SADECE LONG SKOR, TÜM FİLTRELER AKTİF)
 # =========================================================
 async def scan_coin(session, symbol, pre_fetched_5m, market_median, btc_change, min_score_atr, is_futures, klines_1h_cache, daily_change):
     # Günlük %10 artmış coinleri ele
@@ -191,7 +189,7 @@ async def scan_coin(session, symbol, pre_fetched_5m, market_median, btc_change, 
     closes = [float(k[4]) for k in kl_5m[-15:]]
     atr_val = calculate_atr(highs, lows, closes)
     if atr_val is None:
-        return None  # ATR yoksa sinyal geçersiz
+        return None
 
     # OI / Funding
     oi_change = 0
@@ -207,9 +205,9 @@ async def scan_coin(session, symbol, pre_fetched_5m, market_median, btc_change, 
         funding = await get_cached(session, "funding", symbol, "/fapi/v1/premiumIndex", {"symbol": symbol})
         if funding: funding_rate = float(funding.get("lastFundingRate", 0))
 
-    # Trend
+    # Trend (sadece long için gerekli)
     ema20_1h = ema50_4h = None
-    bullish_structure = bearish_structure = False
+    bullish_structure = False
 
     if symbol in klines_1h_cache:
         kl_1h = klines_1h_cache[symbol]
@@ -226,41 +224,37 @@ async def scan_coin(session, symbol, pre_fetched_5m, market_median, btc_change, 
         if kl_15m and len(kl_15m) >= 4:
             h_list = [float(k[2]) for k in kl_15m[-4:]]
             l_list = [float(k[3]) for k in kl_15m[-4:]]
-            if h_list[-1] > h_list[-2] and l_list[-1] > l_list[-2]: bullish_structure = True
-            if h_list[-1] < h_list[-2] and l_list[-1] < l_list[-2]: bearish_structure = True
+            if h_list[-1] > h_list[-2] and l_list[-1] > l_list[-2]:
+                bullish_structure = True
 
-    # Skorlama
-    long_score, short_score = 0, 0
+    # SADECE LONG SKOR
+    long_score = 0
     squeeze = False
 
-    if speed_ratio > 1.8:
-        if change_pct > 0: long_score += 2
-        else: short_score += 2
+    if speed_ratio > 1.8 and change_pct > 0:
+        long_score += 2
 
     recent_range = high - low
     if recent_range > 0:
         normalized_change = change_pct / (recent_range / close_price * 100) if (recent_range / close_price * 100) > 0 else 0
-        if 0.1 < abs(normalized_change) < 5:
-            if normalized_change > 0: long_score += 2
-            else: short_score += 2
+        if 0.1 < normalized_change < 5 and normalized_change > 0:
+            long_score += 2
 
     if taker_ratio > 0.55: long_score += 2
-    if taker_ratio < 0.45: short_score += 2
     if delta_ratio > 0.15: long_score += 2
-    if delta_ratio < -0.15: short_score += 2
 
-    if oi_change > 1 and delta_ratio > 0.15 and close_price > open_price: long_score += 2
-    if oi_change > 1 and delta_ratio < -0.15 and close_price < open_price: short_score += 2
+    if oi_change > 1 and delta_ratio > 0.15 and close_price > open_price:
+        long_score += 2
 
     if funding_rate < -0.005 and change_pct > 0:
-        long_score += 2; squeeze = True
-    if funding_rate > 0.005 and change_pct < 0:
-        short_score += 2
+        long_score += 2
+        squeeze = True
 
-    if btc_change > 0: rs = change_pct - btc_change
-    else: rs = change_pct + abs(btc_change)
+    if btc_change > 0:
+        rs = change_pct - btc_change
+    else:
+        rs = change_pct + abs(btc_change)
     if rs > 1.0: long_score += 2
-    if rs < -1.0: short_score += 2
 
     if heavy_check and len(kl_5m) > 6:
         recent_high = max(float(k[2]) for k in kl_5m[-6:-1])
@@ -268,67 +262,61 @@ async def scan_coin(session, symbol, pre_fetched_5m, market_median, btc_change, 
         compression_range = recent_high - recent_low
         compression = (compression_range / close_price) * 100 if close_price > 0 else 0
         breakout_strength = (speed_ratio > 1.5 and delta_ratio > 0.12 and taker_ratio > 0.54)
-        if compression < 1.2 and breakout_strength:
-            if delta_ratio > 0.12: long_score += 3
-            elif delta_ratio < -0.12: short_score += 3
+        if compression < 1.2 and breakout_strength and delta_ratio > 0.12:
+            long_score += 3
 
-    if btc_change <= 0 and oi_change > 2 and delta_ratio > 0.15: long_score += 3
+    if btc_change <= 0 and oi_change > 2 and delta_ratio > 0.15:
+        long_score += 3
 
     if ema20_1h and close_price > ema20_1h: long_score += 1
-    if ema20_1h and close_price < ema20_1h: short_score += 1
     if ema50_4h and close_price > ema50_4h: long_score += 2
-    if ema50_4h and close_price < ema50_4h: short_score += 2
     if bullish_structure: long_score += 2
-    if bearish_structure: short_score += 2
 
-    if rel_vol > 1.8: long_score += 2; short_score += 2
-    elif rel_vol > 1.3: long_score += 1; short_score += 1
+    if rel_vol > 1.8: long_score += 2
+    elif rel_vol > 1.3: long_score += 1
 
-    if wick_ratio > 0.5: long_score -= 1; short_score -= 1
+    if wick_ratio > 0.5: long_score -= 1
 
-    market_long_allowed = btc_change > -0.8
-    market_short_allowed = btc_change < 1.5
-    if not market_long_allowed: long_score -= 4
-    if not market_short_allowed: short_score -= 4
+    if btc_change <= -0.8:
+        long_score -= 4
 
-    if btc_change > 1.5 and symbol != "BTCUSDT": long_score -= 2
+    if btc_change > 1.5 and symbol != "BTCUSDT":
+        long_score -= 2
 
-    if ema50_4h and close_price > ema50_4h and ema20_1h and close_price > ema20_1h and bullish_structure: long_score += 3
-    if ema50_4h and close_price < ema50_4h and ema20_1h and close_price < ema20_1h and bearish_structure: short_score += 3
+    if ema50_4h and close_price > ema50_4h and ema20_1h and close_price > ema20_1h and bullish_structure:
+        long_score += 3
 
-    # SL/TP
-    sl_mult, tp_mult = 1.5, 2.5
-    result = None
-    if long_score >= min_score_atr:
-        confidence = min(95, 45 + int(long_score * 3))
-        sl_price = round(close_price - atr_val * sl_mult, 4)
-        tp_price = round(close_price + atr_val * tp_mult, 4)
-        result = {
-            "symbol": symbol, "direction": "LONG", "score": long_score, "confidence": confidence,
-            "price": round(close_price, 4), "change": round(change_pct, 2), "oi": round(oi_change, 2),
-            "funding": funding_rate, "delta": delta_ratio, "rel_vol": round(rel_vol, 2),
-            "trend": "Bullish", "squeeze": squeeze, "rs": round(rs, 1),
-            "sl": sl_price, "tp": tp_price
-        }
-    elif short_score >= min_score_atr:
-        confidence = min(95, 45 + int(short_score * 3))
-        sl_price = round(close_price + atr_val * sl_mult, 4)
-        tp_price = round(close_price - atr_val * tp_mult, 4)
-        result = {
-            "symbol": symbol, "direction": "SHORT", "score": short_score, "confidence": confidence,
-            "price": round(close_price, 4), "change": round(change_pct, 2), "oi": round(oi_change, 2),
-            "funding": funding_rate, "delta": delta_ratio, "rel_vol": round(rel_vol, 2),
-            "trend": "Bearish", "squeeze": False, "rs": round(rs, 1),
-            "sl": sl_price, "tp": tp_price
-        }
+    # Sonuç
+    if long_score < min_score_atr:
+        return None
 
-    return result
+    confidence = min(95, 45 + int(long_score * 3))
+    sl_price = round(close_price - atr_val * 1.5, 4)
+    tp_price = round(close_price + atr_val * 2.5, 4)
+
+    return {
+        "symbol": symbol,
+        "direction": "LONG",
+        "score": long_score,
+        "confidence": confidence,
+        "price": round(close_price, 4),
+        "change": round(change_pct, 2),
+        "oi": round(oi_change, 2),
+        "funding": funding_rate,
+        "delta": delta_ratio,
+        "rel_vol": round(rel_vol, 2),
+        "trend": "Bullish",
+        "squeeze": squeeze,
+        "rs": round(rs, 1),
+        "sl": sl_price,
+        "tp": tp_price
+    }
 
 # =========================================================
 # MAIN
 # =========================================================
 async def main():
-    print("🚀 TÜM BINANCE TR (Günlük %10 filtresi + ATR garantili)")
+    print("🚀 SADECE LONG SİNYAL BOTU (TÜM FİLTRELER)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         COIN_LIST, FUTURES_SET = await get_all_symbols_combined(session)
@@ -341,11 +329,9 @@ async def main():
             try:
                 start_time = time.time()
 
-                # 24 saatlik değişim haritaları (tek istek ile tüm coinler)
                 futures_daily = await get_daily_change_map(session, is_futures=True)
                 spot_daily = await get_daily_change_map(session, is_futures=False)
 
-                # BTC
                 btc_klines = await fetch(session, "fapi", "/fapi/v1/klines", {"symbol": "BTCUSDT", "interval": "15m", "limit": 10})
                 btc_change = 0.0
                 btc_atr_percent = 0.0
@@ -358,7 +344,6 @@ async def main():
 
                 min_score_atr = 7 if btc_atr_percent < 1.0 else (9 if btc_atr_percent > 2.5 else 8)
 
-                # 5m verileri
                 tasks_5m = []
                 for sym in COIN_LIST:
                     if sym in FUTURES_SET:
@@ -367,12 +352,12 @@ async def main():
                         tasks_5m.append(fetch(session, "spot", "/api/v3/klines", {"symbol": sym, "interval": "5m", "limit": 20}))
                 responses_5m = await asyncio.gather(*tasks_5m)
 
-                # 1h cache
                 tasks_1h = [fetch(session, "fapi", "/fapi/v1/klines", {"symbol": sym, "interval": "1h", "limit": 20}) for sym in COIN_LIST if sym in FUTURES_SET]
                 responses_1h = await asyncio.gather(*tasks_1h)
                 klines_1h_cache = {}
                 for sym, kl in zip([s for s in COIN_LIST if s in FUTURES_SET], responses_1h):
-                    if kl and len(kl) >= 20: klines_1h_cache[sym] = kl
+                    if kl and len(kl) >= 20:
+                        klines_1h_cache[sym] = kl
 
                 vols = [float(r[-2][5]) for r in responses_5m if r and len(r) >= 2]
                 filtered_vols = [v for v in vols if v > 100000]
@@ -382,7 +367,6 @@ async def main():
                 for sym, kl_5m in zip(COIN_LIST, responses_5m):
                     if not kl_5m or len(kl_5m) < 20: continue
                     is_fut = sym in FUTURES_SET
-                    # günlük değişim değerini al
                     daily_change = futures_daily.get(sym) if is_fut else spot_daily.get(sym)
                     task = scan_coin(session, sym, kl_5m, market_median, btc_change, min_score_atr, is_fut, klines_1h_cache, daily_change)
                     scan_tasks.append(task)
@@ -397,13 +381,14 @@ async def main():
                     if results:
                         top_coin = results[0]
                         await send_telegram(session, top_coin)
-                        print(f"✅ Sinyal: {top_coin['symbol']} {top_coin['direction']} (Puan: {top_coin['score']})")
+                        print(f"✅ Sinyal: {top_coin['symbol']} LONG (Puan: {top_coin['score']})")
                         last_global_signal = now
                         last_signals[top_coin['symbol']] = now
                 else:
-                    if results: print(f"⏳ Cooldown devrede. {results[0]['symbol']} atlandı.")
+                    if results:
+                        print(f"⏳ Cooldown devrede. {results[0]['symbol']} atlandı.")
 
-                print(f"🔍 Eşiği geçen {len(results)} coin (Min Skor: {min_score_atr})")
+                print(f"🔍 Eşiği geçen {len(results)} LONG adayı (Min Skor: {min_score_atr})")
 
                 elapsed = time.time() - start_time
                 if elapsed < 35:
