@@ -17,27 +17,23 @@ if not BOT_TOKEN or not CHAT_ID:
     print("❌ BOT_TOKEN veya CHAT_ID ortam değişkeni eksik!")
     exit(1)
 
-FAPI_URL = "https://fapi.binance.com"       # Binance Futures (Global)
-SPOT_GLOBAL_URL = "https://api.binance.com" # Binance Global (ana veri kaynağı)
+FAPI_URL = "https://fapi.binance.com"
+SPOT_GLOBAL_URL = "https://api.binance.com"
 
-# Tarama ayarları
 SCAN_INTERVAL = 40
 COOLDOWN = 600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 3
 BATCH_SIZE = 25
 
-# Hacim ve skor filtreleri
-MIN_QUOTE_VOLUME = 500_000
+# Artık sabit değil, dinamik hesaplanacak
 MIN_SCORE_BASE = 5
 MIN_SCORE_HIGH_VOLATILITY = 7
 MIN_SCORE_LOW_VOLATILITY = 4
 
-# TP/SL çarpanları
 TP_MULT = 10
 SL_MULT = 5
 
-# Önbellek süreleri
 CACHE_5M = 35
 CACHE_15M = 180
 CACHE_1H = 300
@@ -53,12 +49,16 @@ STABLECOIN_BLACKLIST = {
     "USDPUSDT", "FDUSDUSDT", "USTCUSDT", "EURSUSDT"
 }
 
-MAJOR_COINS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
+# Dev coin'ler ve stablecoin'ler dinamik hacim hesabına katılmaz
+EXCLUDE_FROM_VOLUME_CALC = {
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT", "FDUSDUSDT"
+}
 
 # =========================================================
-# BINANCE TR SPOT LİSTESİ (GÜNCEL)
+# BINANCE TR SPOT LİSTESİ (ZEC ve olmayanlar çıkarıldı)
 # =========================================================
-TR_COIN_LIST = [
+TR_COIN_LIST = sorted([
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SOLUSDT", "AVAXUSDT",
     "DOTUSDT", "LINKUSDT", "UNIUSDT", "MATICUSDT", "SHIBUSDT", "DOGEUSDT",
     "LTCUSDT", "TRXUSDT", "ATOMUSDT", "NEARUSDT", "ALGOUSDT", "FTMUSDT",
@@ -67,8 +67,31 @@ TR_COIN_LIST = [
     "DYDXUSDT", "EGLDUSDT", "FLOWUSDT", "GRTUSDT", "ICPUSDT", "KSMUSDT",
     "LRUSDT", "MKRUSDT", "OMGUSDT", "QNTUSDT", "RENUSDT", "RSRUSDT",
     "SKLUSDT", "SNXUSDT", "STORJUSDT", "SUSHIUSDT", "SXPUSDT", "UMAUSDT",
-    "YFIUSDT", "ZECUSDT", "ZENUSDT", "ZRXUSDT", "1INCHUSDT"
-]
+    "YFIUSDT", "ZENUSDT", "ZRXUSDT", "1INCHUSDT", "AAVEUSDT",
+    "ACHUSDT", "AGLDUSDT", "AKROUSDT", "ALICEUSDT", "ALPHAUSDT", "ANKRUSDT",
+    "APEUSDT", "API3USDT", "ARPAUSDT", "AUDIOUSDT", "BAKEUSDT", "BANDUSDT",
+    "BELUSDT", "BLURUSDT", "BNTUSDT", "C98USDT", "CAKEUSDT", "COTIUSDT",
+    "CTSIUSDT", "CTXCUSDT", "CVCUSDT", "DARUSDT", "DENTUSDT", "DGBUSDT",
+    "DOCKUSDT", "DODOUSDT", "DUSKUSDT", "EDUUSDT", "ERNUSDT", "FETUSDT",
+    "FIDAUSDT", "FORTHUSDT", "FRONTUSDT", "FXSUSDT", "GTCUSDT", "HARDUSDT",
+    "HIGHUSDT", "ICXUSDT", "IDUSDT", "ILVUSDT", "IMXUSDT", "INJUSDT",
+    "IOSTUSDT", "IOTXUSDT", "JASMYUSDT", "JOEUSDT", "KAVAUSDT", "KDAUSDT",
+    "KLAYUSDT", "KNCUSDT", "LDOUSDT", "LINAUSDT", "LOOMUSDT",
+    "LPTUSDT", "LQTYUSDT", "LRCUSDT", "MAGICUSDT", "MASKUSDT", "MDTUSDT",
+    "MINAUSDT", "MLNUSDT", "MTLUSDT", "NKNUSDT", "NMRUSDT",
+    "OCEANUSDT", "OGNUSDT", "ONEUSDT", "ONTUSDT", "OPUSDT", "ORBSUSDT",
+    "OXTUSDT", "PAXGUSDT", "PENDLEUSDT", "PEOPLEUSDT", "PEPEUSDT", "PERLUSDT",
+    "PHAUSDT", "POLSUSDT", "PONDUSDT", "POWRUSDT", "PROMUSDT", "PYRUSDT",
+    "QIUSDT", "RADUSDT", "RAREUSDT", "REEFUSDT", "REIUSDT", "RLCUSDT",
+    "RNDRUSDT", "ROSEUSDT", "RPLUSDT", "RVNUSDT", "SCUSDT", "SFPUSDT",
+    "SLPUSDT", "SNTUSDT", "SPELLUSDT", "STGUSDT", "STMXUSDT", "STPTUSDT",
+    "STRAXUSDT", "SUIUSDT", "SUNUSDT", "SUPERUSDT", "SXPUSDT", "TUSDT",
+    "TFUELUSDT", "THETAUSDT", "TLMUSDT", "TOMOUSDT", "TRBUSDT", "TROYUSDT",
+    "TVKUSDT", "UNFIUSDT", "UTKUSDT", "VETUSDT", "VGXUSDT",
+    "VIDTUSDT", "VITEUSDT", "VOXELUSDT", "VTHOUSDT", "WAVESUSDT", "WAXPUSDT",
+    "WBTCUSDT", "WINUSDT", "WLDUSDT", "WOOUSDT", "WRXUSDT", "XECUSDT",
+    "XEMUSDT", "XLMUSDT", "XMRUSDT", "XTZUSDT", "XVGUSDT", "YGGUSDT"
+])
 
 cache = {
     "funding": {}, "oi": {},
@@ -209,10 +232,9 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:])
 
 # =========================================================
-# COIN LİSTESİ - SADECE TR'DEKİ COINLER
+# COIN LİSTESİ
 # =========================================================
 async def get_spot_symbols(session):
-    """Binance TR listesini sabit olarak döndür (TR API'sine gitmez)."""
     return set(TR_COIN_LIST)
 
 async def get_futures_symbols(session):
@@ -223,7 +245,6 @@ async def get_futures_symbols(session):
             and s.get("status") == "TRADING" and s["symbol"] not in STABLECOIN_BLACKLIST}
 
 async def get_daily_change_map(session, symbols):
-    """GLOBAL SPOT'tan günlük değişimleri çek."""
     cmap = {}
     data = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/ticker/24hr")
     if data:
@@ -235,10 +256,39 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN - TÜM PROFESYONEL FİLTRELER
+# DİNAMİK HACİM FİLTRESİ HESAPLAMA
+# =========================================================
+def calculate_dynamic_volume_threshold(volumes):
+    """
+    Dev coin'ler ve stablecoin'ler hariç altcoin'lerin hacimlerinden
+    dinamik minimum hacim eşiği hesaplar.
+    """
+    if not volumes:
+        return 100_000  # Varsayılan düşük eşik
+    
+    # Aykırı değerleri temizle (en düşük ve en yüksek %10'u at)
+    sorted_vols = sorted(volumes)
+    n = len(sorted_vols)
+    if n >= 10:
+        trimmed = sorted_vols[n//10:-n//10]
+    else:
+        trimmed = sorted_vols
+    
+    if not trimmed:
+        return 100_000
+    
+    # Medyanın %25'i minimum hacim eşiği olsun
+    med = median(trimmed)
+    threshold = max(100_000, min(500_000, med * 0.25))
+    
+    return threshold
+
+# =========================================================
+# SCAN COIN (DİNAMİK HACİM EŞİĞİ İLE)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
-                    btc_change, min_score, klines_1h, klines_4h, klines_15m, daily_change):
+                    btc_change, min_score, dynamic_min_volume, 
+                    klines_1h, klines_4h, klines_15m, daily_change):
     if symbol in last_signals and time.time() - last_signals[symbol] < COOLDOWN:
         return None
     if daily_change is not None and daily_change > 10.0:
@@ -258,7 +308,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if len(closed) >= 13:
         if (close_p - float(closed[-13][4])) / float(closed[-13][4]) * 100 > 8.0: return None
 
-    if quote_vol < MIN_QUOTE_VOLUME or abs(change_pct) > 8.0: return None
+    # Dinamik hacim filtresi
+    if quote_vol < dynamic_min_volume or abs(change_pct) > 8.0: return None
 
     prev_vols = [float(k[5]) for k in kl_5m[-7:-2]]
     avg_vol = mean(prev_vols) if prev_vols else vol
@@ -378,7 +429,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
     if bb_lower is not None and close_p <= bb_lower * 1.02 and change_pct > 0:
         score += 2; reasons.append("BB")
 
-    if symbol in MAJOR_COINS and score < (min_score + 3):
+    # Majör coin'ler için ekstra skor şartı (dinamik eşikle uyumlu)
+    if symbol in EXCLUDE_FROM_VOLUME_CALC and score < (min_score + 3):
         return None
 
     if score < min_score: return None
@@ -404,11 +456,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 BINANCE TR SNIPER BOT (Sabit Liste, {len(TR_COIN_LIST)} coin)")
+    print(f"🚀 DİNAMİK HACİMLİ SNIPER BOT ({len(TR_COIN_LIST)} coin)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 Binance TR Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin)")
+        await send_telegram(session, f"🎯 Dinamik Hacimli Sniper Bot başlatıldı ({len(TR_COIN_LIST)} coin)")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
@@ -462,19 +514,34 @@ async def main():
 
                 valid = {}
                 vols = []
+                # Dinamik hacim için altcoin hacimleri
+                altcoin_volumes = []
+                
                 for s, r in zip(COIN_LIST, resp_5m):
                     if r and len(r) >= 30:
                         valid[s] = r
-                        try: vols.append(float(r[-2][5]))
+                        try:
+                            vol_val = float(r[-2][5])
+                            vols.append(vol_val)
+                            # Dev coin'ler ve stablecoin'ler hariç
+                            if s not in EXCLUDE_FROM_VOLUME_CALC:
+                                quote_vol = float(r[-2][7])
+                                altcoin_volumes.append(quote_vol)
                         except: pass
+                
                 fvols = [v for v in vols if v > 100000]
-                median_vol = median(sorted(fvols)[2:-2]) if len(fvols) > 4 else (median(fvols) if fvols else 1)
+                market_median = median(sorted(fvols)[2:-2]) if len(fvols) > 4 else (median(fvols) if fvols else 1)
+                
+                # Dinamik minimum hacim eşiği hesapla
+                dynamic_min_volume = calculate_dynamic_volume_threshold(altcoin_volumes)
+                print(f"📊 Dinamik hacim eşiği: {dynamic_min_volume:.0f} USDT (Altcoin sayısı: {len(altcoin_volumes)})")
 
                 scan_tasks = []
                 for s in COIN_LIST:
                     if s not in valid: continue
-                    scan_tasks.append(scan_coin(session, s, s in futures_set, valid[s], median_vol,
-                                                btc_change, min_score, k1, k4, k15, daily_map.get(s)))
+                    scan_tasks.append(scan_coin(session, s, s in futures_set, valid[s], market_median,
+                                                btc_change, min_score, dynamic_min_volume,
+                                                k1, k4, k15, daily_map.get(s)))
 
                 all_res = []
                 for i in range(0, len(scan_tasks), BATCH_SIZE):
