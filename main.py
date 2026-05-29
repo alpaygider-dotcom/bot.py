@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (DENGELENDİ + LS DÜZELTİLDİ)
+# AYARLAR (RELVOL KAPISI YÜKSELDİ, RS KAPISI GEVŞEDİ)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -25,9 +25,9 @@ COOLDOWN = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 2
 
-MIN_SCORE_BASE = 8
-MIN_SCORE_HIGH_VOLATILITY = 10
-MIN_SCORE_LOW_VOLATILITY = 6
+MIN_SCORE_BASE = 6
+MIN_SCORE_HIGH_VOLATILITY = 8
+MIN_SCORE_LOW_VOLATILITY = 5
 
 TP_MULT = 10
 SL_MULT = 5
@@ -39,7 +39,7 @@ CACHE_1H = 300
 CACHE_4H = 900
 CACHE_OI = 120
 CACHE_FUNDING = 300
-CACHE_LS_5M = 60   # DAHA KISA CACHE
+CACHE_LS_5M = 60
 CACHE_LS_1H = 300
 CACHE_LS_6H = 1800
 CACHE_LS_12H = 3600
@@ -306,7 +306,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (LS DÜZELTİLDİ + COIN BAZLI HACİM)
+# SCAN COIN (RELVOL KAPISI EKLENDİ, RS GEVŞEDİ)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     btc_change, min_score,
@@ -346,6 +346,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     avg_vol = mean(prev_vols) if prev_vols else vol
     speed = vol / avg_vol if avg_vol > 0 else 0
     rel_vol = round(speed, 2)
+
+    # RELVOL KAPI BEKÇİSİ: 1.3'ün altındaysa sinyal verme
+    if rel_vol < 1.3:
+        return None
 
     heavy = speed > 1.5 or vol > market_median * 2.0
     taker_r = tbuy / vol if vol > 0 else 0
@@ -398,7 +402,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             if fund: funding_rate = float(fund.get("lastFundingRate", 0))
         except: pass
 
-        # LS VERİSİ DÜZELTİLDİ
         try:
             ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
                                     "/futures/data/globalLongShortAccountRatio",
@@ -449,14 +452,15 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             if hh[-1] > hh[-2] and ll[-1] > ll[-2]:
                 bull_struct = True
 
-    # ========== RS HESAPLAMA (KAPI BEKÇİSİ) ==========
+    # ========== RS HESAPLAMA (KAPI GEVŞEDİ) ==========
     if len(closes) >= 12:
         coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
         rs = coin_mom - btc_change
     else:
         rs = 0.0
 
-    if rs <= 0.1:
+    # RS kapısı 0.3'e düşürüldü (RelVol zaten filtreliyor)
+    if rs <= 0.3:
         return None
 
     # ========== LONG SKORLAMA (DENGELİ) ==========
@@ -502,12 +506,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             coin_ret = ((c_now - c_prev) / c_prev) * 100
             recent_rs.append(coin_ret - btc_change)
         rs_trend = mean(recent_rs) if recent_rs else 0
-        if rs_trend > 0.1:
+        if rs_trend > 0.2:
             score += 3
             reasons.append("📈 RS Trend")
 
     # 6. Funding + OI Kombosu
-    if funding_rate < -0.01 and oi_change > 4 and rs > 1:
+    if funding_rate < -0.01 and oi_change > 4 and rs > 0.5:
         score += 5
         reasons.append("💣 Aggressive Positioning")
 
@@ -562,10 +566,19 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if funding_rate < -0.008 and change_pct > 0:
         score += 2; squeeze = True; reasons.append("Squeeze")
 
+    # RS BONUS
     if rs > 1.5:
         score += 4; reasons.append(f"🚀 RS {rs:.2f}")
-    else:
+    elif rs > 0.5:
         score += 2; reasons.append(f"✅ RS {rs:.2f}")
+
+    # RELVOL BONUSU YÜKSELDİ
+    if rel_vol > 2.5:
+        score += 3; reasons.append("🔥 RelVol Patlaması")
+    elif rel_vol > 1.8:
+        score += 2; reasons.append("RelVol Yüksek")
+    elif rel_vol > 1.3:
+        score += 1; reasons.append("RelVol")
 
     ls_details = []
     if ls_5m_change < -2:
@@ -597,9 +610,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if ema20_1h is not None and close_p > ema20_1h: score += 1; reasons.append("1h↑")
     if ema50_4h is not None and close_p > ema50_4h: score += 1; reasons.append("4h↑")
     if bull_struct: score += 1; reasons.append("15m↑")
-
-    if rel_vol > 2.5: score += 2; reasons.append("RelVol")
-    elif rel_vol > 1.8: score += 1
 
     if wick_r > 0.55: score -= 2
 
@@ -645,11 +655,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if vol_acceleration > 1.8: categories.add("vol_accel")
     if liquidity_sweep: categories.add("liq_sweep")
     if absorption: categories.add("absorption")
-    if rs_trend > 0.1: categories.add("rs_trend")
+    if rs_trend > 0.2: categories.add("rs_trend")
     if dryup: categories.add("dryup")
     if whale_candle: categories.add("whale")
 
-    if len(categories) < 4:
+    if len(categories) < 3:
         return None
 
     if score < min_score: return None
@@ -678,11 +688,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 LS DÜZELTİLDİ + COIN BAZLI HACİM")
+    print(f"🚀 RELVOL KAPILI + RS GEVŞEK")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 LS Düzeltilmiş Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 RelVol Kapılı Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
@@ -726,7 +736,6 @@ async def main():
                 k4 = {s: r for s, r in zip(fut_list, r4) if r is not None}
                 k15 = {s: r for s, r in zip(fut_list, r15) if r is not None}
 
-                # 1m verileri sadece futures coinler için
                 tasks_1m = {}
                 for s in fut_list:
                     tasks_1m[s] = get_cached(session, "klines_1m", s, FAPI_URL,
