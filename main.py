@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (RELVOL KAPISI YÜKSELDİ, RS KAPISI GEVŞEDİ)
+# AYARLAR
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -59,6 +59,9 @@ EXCLUDE_FROM_VOLUME_CALC = {
 }
 
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
+
+# Majör coinler - bunlara özel sıkı filtreler uygulanacak
+MAJOR_COINS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT"}
 
 TR_COIN_LIST = sorted([
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SOLUSDT", "AVAXUSDT",
@@ -306,7 +309,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (RELVOL KAPISI EKLENDİ, RS GEVŞEDİ)
+# SCAN COIN (MAJÖR COIN FİLTRESİ, İYİLEŞTİRİLMİŞ HACİM)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     btc_change, min_score,
@@ -335,10 +338,17 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         hour_change = (close_p - price_1h_ago) / price_1h_ago * 100
         if hour_change > 2.0: return None
 
-    # COIN BAZLI HACİM FİLTRESİ
+    # COIN BAZLI HACİM FİLTRESİ - DAHA SIKI
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote_vol_coin = max(150_000, coin_median_vol * 0.20)
+    
+    # Küçük coinler için daha sıkı eşik: kendi medyanının %60'ı
+    if symbol in MAJOR_COINS:
+        # Majör coinler: %40 (zaten büyükler, biraz gevşek)
+        min_quote_vol_coin = max(200_000, coin_median_vol * 0.40)
+    else:
+        # Altcoinler: %60
+        min_quote_vol_coin = max(150_000, coin_median_vol * 0.60)
     
     if quote_vol < min_quote_vol_coin or abs(change_pct) > 8.0: return None
 
@@ -347,11 +357,15 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     speed = vol / avg_vol if avg_vol > 0 else 0
     rel_vol = round(speed, 2)
 
-    # RELVOL KAPI BEKÇİSİ: 1.3'ün altındaysa sinyal verme
-    if rel_vol < 1.3:
-        return None
+    # RELVOL KAPI BEKÇİSİ - MAJÖR COINLERE ÖZEL SIKI EŞİK
+    if symbol in MAJOR_COINS:
+        if rel_vol < 1.8:  # Majörler için daha yüksek eşik
+            return None
+    else:
+        if rel_vol < 1.3:  # Altcoinler için normal eşik
+            return None
 
-    heavy = speed > 1.5 or vol > market_median * 2.0
+    heavy = speed > 1.5  # market_median bağımlılığı kaldırıldı
     taker_r = tbuy / vol if vol > 0 else 0
     delta = tbuy - (vol - tbuy)
     delta_r = delta / vol if vol > 0 else 0
@@ -459,11 +473,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     else:
         rs = 0.0
 
-    # RS kapısı 0.3'e düşürüldü (RelVol zaten filtreliyor)
     if rs <= 0.3:
         return None
 
-    # ========== LONG SKORLAMA (DENGELİ) ==========
+    # ========== LONG SKORLAMA ==========
     score = 0
     reasons = []
     squeeze = False
@@ -572,7 +585,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     elif rs > 0.5:
         score += 2; reasons.append(f"✅ RS {rs:.2f}")
 
-    # RELVOL BONUSU YÜKSELDİ
+    # RELVOL BONUSU
     if rel_vol > 2.5:
         score += 3; reasons.append("🔥 RelVol Patlaması")
     elif rel_vol > 1.8:
@@ -659,10 +672,17 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if dryup: categories.add("dryup")
     if whale_candle: categories.add("whale")
 
-    if len(categories) < 3:
+    # Kategori sayısı 4'e çıkarıldı
+    if len(categories) < 4:
         return None
 
-    if score < min_score: return None
+    # MAJÖR COINLER İÇİN EKSTRA SKOR ŞARTI
+    if symbol in MAJOR_COINS:
+        if score < min_score + 2:  # Majörler için +2 daha yüksek eşik
+            return None
+    else:
+        if score < min_score:
+            return None
 
     conf = min(95, 55 + score * 3)
     tp_price = round(close_p + atr_val * TP_MULT, 4)
@@ -688,11 +708,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors
-    print(f"🚀 RELVOL KAPILI + RS GEVŞEK")
+    print(f"🚀 MAJÖR COIN FİLTRELİ + DAHA SIKI HACİM")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 RelVol Kapılı Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 Majör Coin Filtreli Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
