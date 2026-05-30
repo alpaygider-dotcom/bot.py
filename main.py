@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (PROFESYONEL ERKEN UYARI FİLTRELERİ)
+# AYARLAR (BUGFIX + İYİLEŞTİRMELER)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -21,13 +21,14 @@ FAPI_URL = "https://fapi.binance.com"
 SPOT_GLOBAL_URL = "https://api.binance.com"
 
 SCAN_INTERVAL = 20
-COOLDOWN = 3600
+COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 3
 
-MIN_SCORE_BASE = 6
-MIN_SCORE_HIGH_VOLATILITY = 8
-MIN_SCORE_LOW_VOLATILITY = 5
+# Minimum skor eşikleri yükseltildi (daha az ama kaliteli sinyal)
+MIN_SCORE_BASE = 9
+MIN_SCORE_HIGH_VOLATILITY = 12
+MIN_SCORE_LOW_VOLATILITY = 7
 
 TP_MULT = 10
 SL_MULT = 5
@@ -59,6 +60,14 @@ MAJOR_COINS_BLACKLIST = {
 }
 
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
+
+SECTOR_GROUPS = {
+    "ai": ["FETUSDT", "RNDRUSDT", "WLDUSDT", "OCEANUSDT", "AGIXUSDT"],
+    "l1": ["AVAXUSDT", "NEARUSDT", "FTMUSDT", "EGLDUSDT", "KLAYUSDT", "SUIUSDT"],
+    "defi": ["UNIUSDT", "LINKUSDT", "AAVEUSDT", "CRVUSDT", "MKRUSDT"],
+    "gaming": ["SANDUSDT", "MANAUSDT", "AXSUSDT", "GALAUSDT", "ENJUSDT"],
+    "storage": ["FILUSDT", "ARUSDT", "STORJUSDT"]
+}
 
 TR_COIN_LIST = sorted([
     "AVAXUSDT", "LINKUSDT", "UNIUSDT", "MATICUSDT", "SHIBUSDT",
@@ -96,21 +105,19 @@ TR_COIN_LIST = sorted([
 
 TR_COIN_LIST = [s for s in TR_COIN_LIST if s not in MAJOR_COINS_BLACKLIST]
 
-# Dinamik kara liste: Son 2 saat içinde sinyal veren coinler
-recent_signal_coins = deque(maxlen=50)  # Son 50 sinyali tutar
-
 cache = {
     "funding": {}, "oi": {},
     "ls_5m": {}, "ls_1h": {}, "ls_6h": {}, "ls_12h": {},
     "klines_1m": {}, "klines_5m": {}, "klines_15m": {}, "klines_1h": {}, "klines_4h": {}
 }
 last_signals = {}
-watchlist = {}  # İzleme listesi: {symbol: {"time": ..., "score": ..., "rs": ...}}
+watchlist = {}
 bot_running = True
 pending_command = None
 consecutive_errors = 0
 signal_history = deque(maxlen=100)
 signal_tracker = {}
+recent_signal_coins = deque(maxlen=50)  # Süre çakışması düzeltildi
 
 # =========================================================
 # TELEGRAM
@@ -159,31 +166,17 @@ async def generate_report(session):
         return
 
     report_lines = ["📊 *Sinyal Performans Raporu*"]
-    
     for symbol, data in signal_tracker.items():
         entry_price = data['price']
-        entry_time = data['time']
-        
-        current_price = None
         try:
             ticker = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/ticker/price", {"symbol": symbol})
-            if ticker:
-                current_price = float(ticker['price'])
-        except:
-            pass
-        
-        if current_price:
+            current_price = float(ticker['price']) if ticker else entry_price
             change_pct = ((current_price - entry_price) / entry_price) * 100
-            elapsed_hours = (time.time() - entry_time) / 3600
+            elapsed = (time.time() - data['time']) / 3600
             emoji = "🟢" if change_pct > 0 else "🔴"
-            report_lines.append(
-                f"{emoji} *{symbol}* | Giriş: {entry_price} | "
-                f"Güncel: {current_price} | %{change_pct:+.2f} | "
-                f"({elapsed_hours:.1f}saat)"
-            )
-        else:
+            report_lines.append(f"{emoji} *{symbol}* | Giriş: {entry_price} | Güncel: {current_price} | %{change_pct:+.2f} | ({elapsed:.1f}saat)")
+        except:
             report_lines.append(f"⚪ *{symbol}* | Giriş: {entry_price} | Fiyat alınamadı")
-
     await send_telegram(session, "\n".join(report_lines))
 
 # =========================================================
@@ -208,10 +201,8 @@ async def fetch(session, url, params=None):
                         return None
                     return await resp.json()
         except asyncio.CancelledError:
-            print(f"⚠️ İstek iptal edildi: {url}")
             raise
         except asyncio.TimeoutError:
-            print(f"⚠️ Timeout ({attempt+1}/3): {url}")
             await asyncio.sleep(backoff)
             backoff *= 2
         except Exception:
@@ -239,17 +230,19 @@ async def get_cached(session, cache_name, key, base, endpoint, params, duration)
 def calculate_ema(prices, period):
     if len(prices) < period: return None
     m = 2 / (period + 1)
-    ema = mean(prices[:period])
+    e = mean(prices[:period])
     for p in prices[period:]:
-        ema = (p - ema) * m + ema
-    return ema
+        e = (p - e) * m + e
+    return e
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1: return None
-    gains = [max(0, prices[i] - prices[i-1]) for i in range(1, len(prices))]
-    losses = [max(0, prices[i-1] - prices[i]) for i in range(1, len(prices))]
-    avg_gain = mean(gains[:period])
-    avg_loss = mean(losses[:period])
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
+    avg_gain, avg_loss = mean(gains[:period]), mean(losses[:period])
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period-1) + gains[i]) / period
         avg_loss = (avg_loss * (period-1) + losses[i]) / period
@@ -258,22 +251,19 @@ def calculate_rsi(prices, period=14):
 
 def calculate_real_macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow + signal: return None, None, None
-    fm = 2 / (fast + 1)
-    sm = 2 / (slow + 1)
-    ema_fast = [mean(prices[:fast])]
-    ema_slow = [mean(prices[:slow])]
+    fm, sm = 2/(fast+1), 2/(slow+1)
+    ema_fast, ema_slow = [mean(prices[:fast])], [mean(prices[:slow])]
     for i in range(fast, len(prices)):
         ema_fast.append((prices[i] - ema_fast[-1]) * fm + ema_fast[-1])
     for i in range(slow, len(prices)):
         ema_slow.append((prices[i] - ema_slow[-1]) * sm + ema_slow[-1])
     offset = slow - fast
-    macd_line = [ema_fast[offset + i] - ema_slow[i] for i in range(len(ema_slow))]
-    sigm = 2 / (signal + 1)
+    macd_line = [ema_fast[offset+i] - ema_slow[i] for i in range(len(ema_slow))]
+    sigm = 2/(signal+1)
     signal_line = [mean(macd_line[:signal])]
     for i in range(signal, len(macd_line)):
         signal_line.append((macd_line[i] - signal_line[-1]) * sigm + signal_line[-1])
-    histogram = macd_line[-1] - signal_line[-1]
-    return macd_line[-1], signal_line[-1], histogram
+    return macd_line[-1], signal_line[-1], macd_line[-1] - signal_line[-1]
 
 def calculate_bollinger(prices, period=20, std_dev=2):
     if len(prices) < period: return None, None, None
@@ -287,23 +277,13 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:])
 
 def calculate_vwap(klines):
-    cumulative_tp_vol = 0
-    cumulative_vol = 0
-    
+    cum_tp_vol, cum_vol = 0, 0
     for k in klines:
-        high = float(k[2])
-        low = float(k[3])
-        close = float(k[4])
+        tp = (float(k[2]) + float(k[3]) + float(k[4])) / 3
         vol = float(k[5])
-        
-        tp = (high + low + close) / 3
-        cumulative_tp_vol += tp * vol
-        cumulative_vol += vol
-    
-    if cumulative_vol == 0:
-        return None
-    
-    return cumulative_tp_vol / cumulative_vol
+        cum_tp_vol += tp * vol
+        cum_vol += vol
+    return cum_tp_vol / cum_vol if cum_vol > 0 else None
 
 # =========================================================
 # COIN LİSTESİ
@@ -331,23 +311,33 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (ERKEN UYARI FİLTRELERİ EKLENDİ)
+# SCAN COIN (BUGFIX + İYİLEŞTİRMELER)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     btc_change, min_score,
-                    klines_1h, klines_4h, klines_15m, daily_change):
+                    klines_1h, klines_4h, klines_15m, daily_change, sector_strength):
     global watchlist, recent_signal_coins
-    
-    # Dinamik kara liste: Son 2 saat içinde sinyal vermiş coinleri atla
-    if symbol in recent_signal_coins:
-        return None
-    
-    if symbol in last_signals and time.time() - last_signals[symbol] < COOLDOWN:
-        return None
-    
+
+    # Dinamik cooldown (ATR yüzdesel - düzeltildi)
+    now = time.time()
+    if symbol in last_signals:
+        highs_dyn = [float(k[2]) for k in kl_5m[-30:-1]]
+        lows_dyn = [float(k[3]) for k in kl_5m[-30:-1]]
+        closes_dyn = [float(k[4]) for k in kl_5m[-30:-1]]
+        atr_dyn = calculate_atr(highs_dyn, lows_dyn, closes_dyn)
+        close_p_rel = float(kl_5m[-2][4])
+        if atr_dyn and atr_dyn > 0 and close_p_rel > 0:
+            atr_pct = (atr_dyn / close_p_rel) * 100
+            dynamic_cooldown = int(COOLDOWN_BASE * (2.0 / max(atr_pct, 0.3)))
+            dynamic_cooldown = max(1800, min(10800, dynamic_cooldown))
+        else:
+            dynamic_cooldown = COOLDOWN_BASE
+        if now - last_signals[symbol] < dynamic_cooldown:
+            return None
+
     if daily_change is not None and daily_change > 5.0:
         return None
-    
+
     if not kl_5m or len(kl_5m) < 30:
         return None
 
@@ -363,28 +353,25 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 
     if len(closed) >= 13:
         price_1h_ago = float(closed[-13][4])
-        hour_change = (close_p - price_1h_ago) / price_1h_ago * 100
-        if hour_change > 2.0: return None
+        if ((close_p - price_1h_ago) / price_1h_ago * 100) > 2.0: return None
 
-    # COIN BAZLI HACİM FİLTRESİ
+    # Coin bazlı hacim
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote_vol_coin = max(150_000, coin_median_vol * 0.60)
-    
-    if quote_vol < min_quote_vol_coin or abs(change_pct) > 8.0: return None
+    min_quote = max(150_000, coin_median_vol * 0.60)
+    if quote_vol < min_quote or abs(change_pct) > 8.0: return None
 
-    # === RELVOL = TAKER BUY VOLUME ===
-    taker_vol_history = [float(k[9]) for k in kl_5m[-7:-2]]
-    avg_taker_vol = mean(taker_vol_history) if taker_vol_history else tbuy
-    speed = tbuy / avg_taker_vol if avg_taker_vol > 0 else 0
+    # RelVol = Taker Buy Volume
+    taker_hist = [float(k[9]) for k in kl_5m[-7:-2]]
+    avg_taker = mean(taker_hist) if taker_hist else tbuy
+    speed = tbuy / avg_taker if avg_taker > 0 else 0
     rel_vol = round(speed, 2)
 
     total_speed = vol / mean([float(k[5]) for k in kl_5m[-7:-2]]) if mean([float(k[5]) for k in kl_5m[-7:-2]]) > 0 else 0
 
-    if rel_vol < 1.3:
+    if rel_vol < 1.2:
         return None
 
-    heavy = total_speed > 2.0
     taker_r = tbuy / vol if vol > 0 else 0
     delta = tbuy - (vol - tbuy)
     delta_r = delta / vol if vol > 0 else 0
@@ -399,7 +386,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     atr_val = calculate_atr(highs, lows, closes)
     if atr_val is None: return None
 
-    # === VWAP HESAPLAMA ===
     vwap = calculate_vwap(kl_5m[-50:])
 
     rsi = calculate_rsi(closes, 14)
@@ -407,38 +393,37 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
     bb_width = (bb_upper - bb_lower) / bb_mid if bb_mid > 0 else 1
 
-    # === CVD (Kümülatif Hacim Delta) - SON 5 MUM ===
+    # CVD
     cvd_5 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-6:-1]])
+    cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
 
-    # === YENİ: VOLATİLİTE DARALMASI (Bollinger Squeeze) ===
+    # BB Squeeze
     bb_widths = []
     for i in range(20, len(closes)):
         bb = calculate_bollinger(closes[:i], 20, 2)
         if bb[0] is not None:
-            w = (bb[1] - bb[2]) / bb[0] if bb[0] > 0 else 1
-            bb_widths.append(w)
-    
-    is_squeezing = False
-    if len(bb_widths) >= 10:
-        recent_min_bb = min(bb_widths[-10:])
-        older_median_bb = median(bb_widths) if bb_widths else 1
-        if recent_min_bb < older_median_bb * 0.6:
-            is_squeezing = True
+            bb_widths.append((bb[1] - bb[2]) / bb[0] if bb[0] > 0 else 1)
+    is_squeezing = len(bb_widths) >= 10 and min(bb_widths[-10:]) < median(bb_widths) * 0.6
 
-    # === YENİ: FİYAT KONSOLİDASYONU (YATAY TOPLAMA) ===
+    # Konsolidasyon
     recent_20_high = max(highs[-20:]) if len(highs) >= 20 else high
     recent_20_low = min(lows[-20:]) if len(lows) >= 20 else low
     consolidation_range = (recent_20_high - recent_20_low) / close_p * 100 if close_p > 0 else 100
     is_consolidating = consolidation_range < 1.5
 
-    # === YENİ: ARTAN TABAN (HIGHER LOWS) ===
-    higher_lows = False
-    if len(lows) >= 4:
-        last_4_lows = lows[-4:]
-        if last_4_lows[-1] > last_4_lows[-2] > last_4_lows[-3]:
-            higher_lows = True
+    # UZUN VADELİ SIKIŞMA (24-48 saat)
+    long_consolidation = False
+    if symbol in klines_1h and klines_1h[symbol] is not None and len(klines_1h[symbol]) >= 48:
+        h48_highs = [float(k[2]) for k in klines_1h[symbol][-48:]]
+        h48_lows = [float(k[3]) for k in klines_1h[symbol][-48:]]
+        h48_range = (max(h48_highs) - min(h48_lows)) / close_p * 100 if close_p > 0 else 100
+        if h48_range < 6.0:
+            long_consolidation = True
 
-    # === YENİ: 1M HACİM KURUMASI VE PATLAMA ===
+    # Artan taban
+    higher_lows = len(lows) >= 4 and lows[-1] > lows[-2] > lows[-3]
+
+    # Hacim kuruması ve patlama
     volume_dryup_explosion = False
     if kl_1m and len(kl_1m) >= 12:
         recent_10_vols = [float(k[5]) for k in kl_1m[-11:-1]]
@@ -447,147 +432,49 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         if avg_10_vol > 0 and last_vol / avg_10_vol > 2.0 and mean(recent_10_vols[:5]) < avg_10_vol * 0.6:
             volume_dryup_explosion = True
 
-    # === YENİ: BTC KORELASYONSUZLUK (ANOMALİ) ===
-    btc_correlation = 0
-    if len(closes) >= 30 and abs(btc_change) > 0.01:
-        coin_returns = [(closes[i] - closes[i-1]) / closes[i-1] * 100 for i in range(1, len(closes))]
-        if len(coin_returns) >= 30:
-            coin_std = stdev(coin_returns[-30:]) if len(coin_returns) >= 30 else 1
-            coin_mean = mean(coin_returns[-30:])
-            normalized_returns = [(r - coin_mean) / coin_std if coin_std > 0 else 0 for r in coin_returns[-30:]]
-            btc_normalized = btc_change / coin_std if coin_std > 0 else 0
-            if len(normalized_returns) >= 2:
-                correlation = sum([normalized_returns[i] * btc_normalized for i in range(len(normalized_returns))]) / len(normalized_returns)
-                btc_correlation = correlation
-
-    oi_change = 0.0
-    has_oi = False
-    funding_rate = 0.0
-
-    ls_5m_str = "N/A"
-    ls_1h_str = "N/A"
-    ls_6h_str = "N/A"
-    ls_12h_str = "N/A"
-    ls_5m_change = 0.0
-    ls_1h_change = 0.0
-    ls_6h_change = 0.0
-    ls_12h_change = 0.0
-
-    if is_futures:
-        try:
-            oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
-                                       "/futures/data/openInterestHist",
-                                       {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
-            if oi_data and len(oi_data) >= 2:
-                prev_oi = float(oi_data[-2]["sumOpenInterestValue"])
-                curr_oi = float(oi_data[-1]["sumOpenInterestValue"])
-                if prev_oi > 0:
-                    oi_change = ((curr_oi - prev_oi) / prev_oi) * 100
-                    has_oi = True
-        except: pass
-        try:
-            fund = await get_cached(session, "funding", symbol, FAPI_URL,
-                                    "/fapi/v1/premiumIndex", {"symbol": symbol}, CACHE_FUNDING)
-            if fund: funding_rate = float(fund.get("lastFundingRate", 0))
-        except: pass
-
-        try:
-            ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
-                                    "/futures/data/globalLongShortAccountRatio",
-                                    {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS_5M)
-            if ls5m and len(ls5m) >= 2:
-                ls_5m_prev = float(ls5m[-2]["longShortRatio"])
-                ls_5m_curr = float(ls5m[-1]["longShortRatio"])
-                ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
-                ls_5m_str = f"5m:{ls_5m_prev:.1f}→{ls_5m_curr:.1f}"
-        except: pass
-
-        if heavy:
-            for period, cache_key, duration, var_prefix in [
-                ("1h", "ls_1h", CACHE_LS_1H, "ls_1h"),
-                ("6h", "ls_6h", CACHE_LS_6H, "ls_6h"),
-                ("12h", "ls_12h", CACHE_LS_12H, "ls_12h")
-            ]:
-                try:
-                    ls_data = await get_cached(session, cache_key, symbol, FAPI_URL,
-                                               "/futures/data/globalLongShortAccountRatio",
-                                               {"symbol": symbol, "period": period, "limit": 2}, duration)
-                    if ls_data and len(ls_data) >= 2:
-                        prev = float(ls_data[-2]["longShortRatio"])
-                        curr = float(ls_data[-1]["longShortRatio"])
-                        change = ((curr - prev) / prev) * 100
-                        if var_prefix == "ls_1h":
-                            ls_1h_prev, ls_1h_curr, ls_1h_change = prev, curr, change
-                            ls_1h_str = f"1h:{prev:.1f}→{curr:.1f}"
-                        elif var_prefix == "ls_6h":
-                            ls_6h_prev, ls_6h_curr, ls_6h_change = prev, curr, change
-                            ls_6h_str = f"6h:{prev:.1f}→{curr:.1f}"
-                        elif var_prefix == "ls_12h":
-                            ls_12h_prev, ls_12h_curr, ls_12h_change = prev, curr, change
-                            ls_12h_str = f"12h:{prev:.1f}→{curr:.1f}"
-                except: pass
-
-    ema20_1h = ema50_4h = None
-    bull_struct = False
-    if symbol in klines_1h and klines_1h[symbol] is not None:
-        ema20_1h = calculate_ema([float(k[4]) for k in klines_1h[symbol]], 20)
-    if symbol in klines_4h and klines_4h[symbol] is not None:
-        ema50_4h = calculate_ema([float(k[4]) for k in klines_4h[symbol]], 50)
-    if symbol in klines_15m and klines_15m[symbol] is not None:
-        kl15 = klines_15m[symbol]
-        if len(kl15) >= 4:
-            hh = [float(k[2]) for k in kl15[-4:]]
-            ll = [float(k[3]) for k in kl15[-4:]]
-            if hh[-1] > hh[-2] and ll[-1] > ll[-2]:
-                bull_struct = True
-
-    # ========== RS HESAPLAMA ==========
-    if len(closes) >= 12:
-        coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
-        rs = coin_mom - btc_change
-    else:
-        rs = 0.0
-
-    if rs <= 0.3:
-        return None
-
-    # ========== LONG SKORLAMA ==========
+    # 🏆 ERKEN SKORLAMA (Ağır API'lerden önce)
     score = 0
     reasons = []
     squeeze = False
 
-    # === YENİ FİLTRELER (ERKEN UYARI) ===
+    # BTC düşerken direnen coin bonusu
+    if btc_change < -0.5 and taker_r > 0.60:
+        score += 10
+        reasons.append("🛡️ BTC'ye Direnen")
+
+    if abs(change_pct) < 0.5 and taker_r > 0.70:
+        score += 8
+        reasons.append("🤫 Sessiz Kurumsal Birikim")
+
     if is_squeezing:
         score += 5
         reasons.append("🎯 BB Sıkışma")
-
     if is_consolidating:
         score += 4
         reasons.append("📦 Yatay Toplama")
-
     if higher_lows:
         score += 3
         reasons.append("📈 Artan Taban")
-
     if volume_dryup_explosion:
         score += 6
         reasons.append("💥 Hacim Patlaması")
-
-    if abs(btc_correlation) < 0.3:
-        score += 3
-        reasons.append("🔄 BTC'den Bağımsız")
-
-    # === VWAP ===
+    if long_consolidation:
+        score += 6
+        reasons.append("⏳ Uzun Sıkışma (48s)")
     if vwap is not None and close_p > vwap:
         score += 3
         reasons.append("📊 VWAP Üstü")
-
-    # === CVD GİZLİ BİRİKİM ===
     if abs(change_pct) < 0.5 and cvd_5 > 0:
         score += 4
         reasons.append("🔍 Gizli Birikim")
+    if cvd_30 > 0 and abs(change_pct) < 1.0:
+        score += 5
+        reasons.append("📈 CVD Trend")
 
-    # === 1M ALIM HIZI ===
+    # Tanımsız değişkenleri başlangıçta sıfırla
+    buying_pressure = 0
+    vol_acceleration = 0
+
     if kl_1m and len(kl_1m) >= 13:
         recent_3m_taker = sum([float(k[9]) for k in kl_1m[-3:]])
         older_10m_taker = sum([float(k[9]) for k in kl_1m[-13:-3]])
@@ -597,7 +484,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             score += 3
             reasons.append("⚡ 1m Alım Hızı")
 
-    # === DİĞER FİLTRELER ===
     if len(closed) >= 13:
         recent_3 = mean([float(k[5]) for k in closed[-3:]])
         older_10 = mean([float(k[5]) for k in closed[-13:-3]])
@@ -622,30 +508,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if absorption:
         score += 4
         reasons.append("🧲 Bid Absorption")
-
-    if len(closes) >= 7:
-        recent_rs = []
-        for i in range(6, 1, -1):
-            c_now = float(closes[-i])
-            c_prev = float(closes[-i-1])
-            coin_ret = ((c_now - c_prev) / c_prev) * 100
-            recent_rs.append(coin_ret - btc_change)
-        rs_trend = mean(recent_rs) if recent_rs else 0
-        if rs_trend > 0.2:
-            score += 3
-            reasons.append("📈 RS Trend")
-
-    if funding_rate < -0.01 and oi_change > 4 and rs > 0.5:
-        score += 5
-        reasons.append("💣 Aggressive Positioning")
-
-    if len(closed) >= 20:
-        older_vol = mean([float(k[5]) for k in closed[-20:-5]])
-        recent_vol = mean([float(k[5]) for k in closed[-5:]])
-        dryup = recent_vol < older_vol * 0.55
-        if dryup and total_speed > 2:
-            score += 4
-            reasons.append("🌪 Vol Expansion")
 
     whale_candle = (body_r > 0.7 and taker_r > 0.65 and delta_r > 0.25 and total_speed > 2)
     if whale_candle:
@@ -683,22 +545,144 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if taker_r > 0.62: score += 2; reasons.append("Taker")
     if delta_r > 0.18: score += 2; reasons.append("Delta")
 
-    if funding_rate < -0.008 and change_pct > 0:
-        score += 2; squeeze = True; reasons.append("Squeeze")
+    if wick_r > 0.55: score -= 2
+    if upper_wick > 0.40 and change_pct > 1.5:
+        score -= 5; reasons.append("Fake breakout")
+    if change_pct > 3.0:
+        score -= 6; reasons.append("Aşırı ısınmış")
+    elif change_pct > 1.5:
+        score -= 3
+    if btc_change <= -0.5 and not ("BTC'ye Direnen" in "".join(reasons)):
+        score -= 5; reasons.append("BTC↓")
+    if btc_change > 1.2 and symbol != "BTCUSDT": score -= 3
 
-    if rs > 1.5:
-        score += 4; reasons.append(f"🚀 RS {rs:.2f}")
-    elif rs > 0.5:
-        score += 2; reasons.append(f"✅ RS {rs:.2f}")
-
+    # RelVol bonus
     if rel_vol > 4.0:
         score += 4; reasons.append("🔥🔥 RelVol Patlaması")
     elif rel_vol > 2.5:
         score += 3; reasons.append("🔥 RelVol Yüksek")
     elif rel_vol > 1.8:
         score += 2; reasons.append("RelVol")
-    elif rel_vol > 1.3:
+    elif rel_vol > 1.2:
         score += 1
+
+    # === İKİ AŞAMALI TARAMA: Ağır API'leri sadece score yeterliyse çek ===
+    heavy = total_speed > 2.0
+    oi_change, has_oi, funding_rate = 0.0, False, 0.0
+    book_imbalance, spot_premium = 0, 0
+    iceberg = False
+    ls_5m_str, ls_1h_str, ls_6h_str, ls_12h_str = "N/A", "N/A", "N/A", "N/A"
+    ls_5m_change, ls_1h_change, ls_6h_change, ls_12h_change = 0.0, 0.0, 0.0, 0.0
+
+    if is_futures and (score >= min_score - 2 or heavy):
+        # Funding
+        try:
+            fund = await get_cached(session, "funding", symbol, FAPI_URL,
+                                    "/fapi/v1/premiumIndex", {"symbol": symbol}, CACHE_FUNDING)
+            if fund: funding_rate = float(fund.get("lastFundingRate", 0))
+        except: pass
+
+        # OI
+        try:
+            oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
+                                       "/futures/data/openInterestHist",
+                                       {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
+            if oi_data and len(oi_data) >= 2:
+                prev_oi = float(oi_data[-2]["sumOpenInterestValue"])
+                curr_oi = float(oi_data[-1]["sumOpenInterestValue"])
+                if prev_oi > 0:
+                    oi_change = ((curr_oi - prev_oi) / prev_oi) * 100
+                    has_oi = True
+        except: pass
+
+        # Order Book (limit 10)
+        if heavy:
+            try:
+                depth = await fetch_api(session, FAPI_URL, "/fapi/v1/depth",
+                                        {"symbol": symbol, "limit": 10})
+                if depth:
+                    bid_vol = sum([float(b[1]) for b in depth.get("bids", [])[:10]])
+                    ask_vol = sum([float(a[1]) for a in depth.get("asks", [])[:10]])
+                    if ask_vol > 0:
+                        book_imbalance = bid_vol / ask_vol
+            except: pass
+
+            # Spot premium
+            try:
+                premium = await fetch_api(session, FAPI_URL, "/fapi/v1/premiumIndex",
+                                          {"symbol": symbol})
+                if premium:
+                    mark_price = float(premium.get("markPrice", 0))
+                    if mark_price > 0:
+                        spot_premium = (close_p - mark_price) / mark_price * 100
+            except: pass
+
+        # Iceberg
+        if abs(change_pct) < 0.3 and taker_r > 0.65 and delta_r > 0:
+            iceberg = True
+            for i in range(1, 6):
+                prev_taker = float(kl_5m[-1-i][9]) / float(kl_5m[-1-i][5]) if float(kl_5m[-1-i][5]) > 0 else 0
+                if prev_taker < 0.55:
+                    iceberg = False
+                    break
+            if iceberg:
+                score += 5
+                reasons.append("🧊 Iceberg Alım")
+
+        # LS 5m
+        try:
+            ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
+                                    "/futures/data/globalLongShortAccountRatio",
+                                    {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS_5M)
+            if ls5m and len(ls5m) >= 2:
+                ls_5m_prev = float(ls5m[-2]["longShortRatio"])
+                ls_5m_curr = float(ls5m[-1]["longShortRatio"])
+                ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
+                ls_5m_str = f"5m:{ls_5m_prev:.1f}→{ls_5m_curr:.1f}"
+        except: pass
+
+        if heavy:
+            for period, cache_key, dur, var_prefix in [
+                ("1h", "ls_1h", CACHE_LS_1H, "ls_1h"),
+                ("6h", "ls_6h", CACHE_LS_6H, "ls_6h"),
+                ("12h", "ls_12h", CACHE_LS_12H, "ls_12h")
+            ]:
+                try:
+                    ls_data = await get_cached(session, cache_key, symbol, FAPI_URL,
+                                               "/futures/data/globalLongShortAccountRatio",
+                                               {"symbol": symbol, "period": period, "limit": 2}, dur)
+                    if ls_data and len(ls_data) >= 2:
+                        prev = float(ls_data[-2]["longShortRatio"])
+                        curr = float(ls_data[-1]["longShortRatio"])
+                        change = ((curr - prev) / prev) * 100
+                        if var_prefix == "ls_1h":
+                            ls_1h_prev, ls_1h_curr, ls_1h_change = prev, curr, change
+                            ls_1h_str = f"1h:{prev:.1f}→{curr:.1f}"
+                        elif var_prefix == "ls_6h":
+                            ls_6h_prev, ls_6h_curr, ls_6h_change = prev, curr, change
+                            ls_6h_str = f"6h:{prev:.1f}→{curr:.1f}"
+                        elif var_prefix == "ls_12h":
+                            ls_12h_prev, ls_12h_curr, ls_12h_change = prev, curr, change
+                            ls_12h_str = f"12h:{prev:.1f}→{curr:.1f}"
+                except: pass
+
+    # Ağır API'lerden sonra skor eklemeleri
+    if funding_rate < 0 and oi_change > 5:
+        score += 6
+        reasons.append("💣 Funding Squeeze Hazırlığı")
+        squeeze = True
+    if funding_rate < -0.008 and change_pct > 0:
+        score += 2; squeeze = True; reasons.append("Squeeze")
+
+    if book_imbalance > 1.5:
+        score += 4
+        reasons.append("📚 Order Book Imbalance")
+    if spot_premium > 0.1:
+        score += 3
+        reasons.append("📊 Spot Premium")
+
+    if has_oi and btc_change <= 0 and oi_change > 3 and delta_r > 0.18:
+        score += 3; reasons.append("BTC↓ güçlü")
 
     ls_details = []
     if ls_5m_change < -2:
@@ -713,37 +697,45 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if ls_12h_change < -10:
         score += 8; reasons.append(f"LS 12h↓↓↓ {ls_12h_str}")
         ls_details.append(ls_12h_str)
-    
     if len(ls_details) >= 2:
         score += 3; reasons.append("Multi-TF LS squeeze")
 
-    if heavy and len(kl_5m) > 6:
-        r_high = max(float(k[2]) for k in kl_5m[-7:-2])
-        r_low = min(float(k[3]) for k in kl_5m[-7:-2])
-        comp = (r_high - r_low) / close_p * 100 if close_p > 0 else 0
-        if comp < 0.8 and total_speed > 2.5 and delta_r > 0.18:
-            score += 5; reasons.append("🔥 Sıkışma kırılımı")
+    # Sektör gücü
+    if sector_strength and symbol in sector_strength:
+        sec_bonus = min(3, sector_strength[symbol])
+        if sec_bonus > 0:
+            score += sec_bonus
+            reasons.append(f"🔥 Sektör Gücü +{sec_bonus}")
 
-    if has_oi and btc_change <= 0 and oi_change > 3 and delta_r > 0.18:
-        score += 3; reasons.append("BTC↓ güçlü")
+    # RS
+    if len(closes) >= 12:
+        coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
+        rs = coin_mom - btc_change
+    else:
+        rs = 0.0
+
+    if rs <= 0.2:
+        return None
+
+    if rs > 1.5:
+        score += 4; reasons.append(f"🚀 RS {rs:.2f}")
+    elif rs > 0.5:
+        score += 2; reasons.append(f"✅ RS {rs:.2f}")
+
+    # Trend
+    ema20_1h = calculate_ema([float(k[4]) for k in klines_1h[symbol]], 20) if symbol in klines_1h and klines_1h[symbol] is not None else None
+    ema50_4h = calculate_ema([float(k[4]) for k in klines_4h[symbol]], 50) if symbol in klines_4h and klines_4h[symbol] is not None else None
+    bull_struct = False
+    if symbol in klines_15m and klines_15m[symbol] is not None:
+        kl15 = klines_15m[symbol]
+        if len(kl15) >= 4:
+            hh = [float(k[2]) for k in kl15[-4:]]
+            ll = [float(k[3]) for k in kl15[-4:]]
+            bull_struct = hh[-1] > hh[-2] and ll[-1] > ll[-2]
 
     if ema20_1h is not None and close_p > ema20_1h: score += 1; reasons.append("1h↑")
     if ema50_4h is not None and close_p > ema50_4h: score += 1; reasons.append("4h↑")
     if bull_struct: score += 1; reasons.append("15m↑")
-
-    if wick_r > 0.55: score -= 2
-
-    if upper_wick > 0.40 and change_pct > 1.5:
-        score -= 5; reasons.append("Fake breakout")
-
-    if change_pct > 3.0:
-        score -= 6; reasons.append("Aşırı ısınmış")
-    elif change_pct > 1.5:
-        score -= 3
-
-    if btc_change <= -0.5: score -= 5; reasons.append("BTC↓")
-    if btc_change > 1.2 and symbol != "BTCUSDT": score -= 3
-
     if ema50_4h is not None and ema20_1h is not None and close_p > ema50_4h and close_p > ema20_1h and bull_struct:
         score += 2; reasons.append("MTF")
 
@@ -761,6 +753,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     elif bb_lower is not None and close_p <= bb_lower * 1.01 and change_pct > 0:
         score += 2; reasons.append("BB")
 
+    # Kategori kontrolü (hatalı değişkenler düzeltildi)
     categories = set()
     if total_speed > 1.5: categories.add("hacim")
     if taker_r > 0.58: categories.add("taker")
@@ -775,8 +768,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if vol_acceleration > 1.8: categories.add("vol_accel")
     if liquidity_sweep: categories.add("liq_sweep")
     if absorption: categories.add("absorption")
-    if rs_trend > 0.2: categories.add("rs_trend")
-    if dryup: categories.add("dryup")
+    if volume_dryup_explosion: categories.add("dryup")  # Düzeltildi
     if whale_candle: categories.add("whale")
     if vwap is not None and close_p > vwap: categories.add("vwap")
     if abs(change_pct) < 0.5 and cvd_5 > 0: categories.add("cvd")
@@ -785,30 +777,44 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if is_consolidating: categories.add("consolidation")
     if higher_lows: categories.add("higher_lows")
     if volume_dryup_explosion: categories.add("dryup_explosion")
-    if abs(btc_correlation) < 0.3: categories.add("btc_independent")
+    if abs(change_pct) < 0.5 and taker_r > 0.70: categories.add("silent_accumulation")
+    if funding_rate < 0 and oi_change > 5: categories.add("funding_squeeze")
+    if book_imbalance > 1.5: categories.add("book_imbalance")
+    if iceberg: categories.add("iceberg")
+    if spot_premium > 0.1: categories.add("spot_premium")
+    if long_consolidation: categories.add("long_consolidation")
+    if btc_change < -0.5 and taker_r > 0.60: categories.add("btc_resistance")
 
     if len(categories) < 3:
         return None
 
-    # WATCHLIST SİSTEMİ - İKİ AŞAMALI SİNYAL
-    if score >= min_score - 1:
+    # Watchlist kontrolü (eşik min_score - 2)
+    if score >= min_score - 2:
         if symbol not in watchlist:
-            # İlk kez eşiğe yaklaştı, izleme listesine al
             watchlist[symbol] = {"time": time.time(), "score": score, "rs": rs}
             return None
         else:
-            # Daha önce izleme listesindeydi, şimdi teyit sinyali
             if score < min_score:
                 return None
-            # İzleme listesinden çıkar
             del watchlist[symbol]
     else:
         if score < min_score:
             return None
 
     conf = min(95, 55 + score * 3)
-    tp_price = round(close_p + atr_val * TP_MULT, 4)
-    sl_price = round(close_p - atr_val * SL_MULT, 4)
+
+    # Dinamik TP/SL
+    if score >= 25:
+        tp_mult, sl_mult = 14, 7
+    elif score >= 18:
+        tp_mult, sl_mult = 12, 6
+    elif score >= 12:
+        tp_mult, sl_mult = 10, 5
+    else:
+        tp_mult, sl_mult = 8, 4
+
+    tp_price = round(close_p + atr_val * tp_mult, 4)
+    sl_price = round(close_p - atr_val * sl_mult, 4)
     tp_pct = round((tp_price - close_p) / close_p * 100, 2)
     sl_pct = round((close_p - sl_price) / close_p * 100, 2)
 
@@ -829,12 +835,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # MAIN
 # =========================================================
 async def main():
-    global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print(f"🚀 ERKEN UYARI + DİNAMİK KARA LİSTE + WATCHLIST")
+    global bot_running, pending_command, consecutive_errors, watchlist, recent_signal_coins
+    print(f"🚀 BUGFIX + İYİLEŞTİRMELER")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 Erken Uyarı Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 Güncellenmiş Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
@@ -848,18 +854,14 @@ async def main():
                 await asyncio.sleep(1)
                 continue
 
-            # Eski sinyalleri temizle (2 saat)
             now = time.time()
-            while recent_signal_coins and now - recent_signal_coins[0][1] > 7200:
+            # recent_signal_coins süresi COOLDOWN_BASE ile aynı olsun (çakışma yok)
+            while recent_signal_coins and now - recent_signal_coins[0][1] > COOLDOWN_BASE:
                 recent_signal_coins.popleft()
-            
-            # Eski izleme listesini temizle (10 dakika)
-            to_remove = []
-            for sym, data in watchlist.items():
-                if now - data["time"] > 600:
-                    to_remove.append(sym)
-            for sym in to_remove:
-                del watchlist[sym]
+
+            to_remove = [s for s, d in watchlist.items() if now - d["time"] > 600]
+            for s in to_remove:
+                del watchlist[s]
 
             try:
                 t0 = time.time()
@@ -910,17 +912,33 @@ async def main():
 
                 valid = {}
                 vols = []
-
                 for s, r in zip(COIN_LIST, resp_5m):
                     if r and len(r) >= 30:
                         valid[s] = r
                         try:
-                            float(r[-2][5])
                             vols.append(float(r[-2][5]))
                         except: pass
 
                 fvols = [v for v in vols if v > 100000]
                 market_median = median(sorted(fvols)[2:-2]) if len(fvols) > 4 else (median(fvols) if fvols else 1)
+
+                # Sektör gücü hesapla (division by zero kontrolü var)
+                sector_strength = {}
+                for sector, coins in SECTOR_GROUPS.items():
+                    sector_rs = []
+                    for coin in coins:
+                        if coin in valid:
+                            coin_closes = [float(k[4]) for k in valid[coin][-20:-1]]
+                            if len(coin_closes) >= 12 and coin_closes[-12] != 0:
+                                coin_mom = (coin_closes[-1] - coin_closes[-12]) / coin_closes[-12] * 100
+                                sector_rs.append(coin_mom - btc_change)
+                    if sector_rs and mean(sector_rs) > 0.3:
+                        for coin in coins:
+                            if coin in valid:
+                                coin_closes = [float(k[4]) for k in valid[coin][-20:-1]]
+                                if len(coin_closes) >= 12 and coin_closes[-12] != 0:
+                                    coin_mom = (coin_closes[-1] - coin_closes[-12]) / coin_closes[-12] * 100
+                                    sector_strength[coin] = min(3, int(mean(sector_rs) * 3))
 
                 scan_tasks = []
                 for s in COIN_LIST:
@@ -928,20 +946,21 @@ async def main():
                     kl_1m = k1m.get(s) if s in futures_set else None
                     scan_tasks.append(scan_coin(session, s, s in futures_set, valid[s], kl_1m, market_median,
                                                 btc_change, min_score,
-                                                k1, k4, k15, daily_map.get(s)))
+                                                k1, k4, k15, daily_map.get(s), sector_strength))
 
                 all_res = []
                 for i in range(0, len(scan_tasks), BATCH_SIZE):
                     batch = scan_tasks[i:i+BATCH_SIZE]
                     all_res.extend([r for r in await asyncio.gather(*batch) if r])
 
-                all_res.sort(key=lambda x: x['rel_vol'], reverse=True)
-                
+                # RelVol lideri seçimi iyileştirildi
+                for r in all_res:
+                    r['relvol_score'] = (r['rel_vol'] * 0.5) + (r['score'] * 0.3) + (r['rs'] * 0.2)
+                all_res.sort(key=lambda x: x['relvol_score'], reverse=True)
                 relvol_leader = all_res[0] if all_res else None
-                
                 if relvol_leader:
                     all_res.remove(relvol_leader)
-                
+
                 for r in all_res:
                     r['rank'] = (
                         (r['score'] * 0.35) +
@@ -958,7 +977,7 @@ async def main():
                 sent = 0
                 if (now - last_global >= GLOBAL_COOLDOWN) or is_forced:
                     if relvol_leader and sent < MAX_SIGNALS_PER_ROUND:
-                        if not (relvol_leader['symbol'] in last_signals and now - last_signals[relvol_leader['symbol']] < COOLDOWN):
+                        if not (relvol_leader['symbol'] in last_signals and now - last_signals[relvol_leader['symbol']] < COOLDOWN_BASE):
                             reasons = ", ".join(relvol_leader['reasons'])
                             oi_str = f"%{relvol_leader['oi']:.2f}" if relvol_leader['oi'] != -999 else "N/A"
                             msg = (
@@ -972,16 +991,14 @@ async def main():
                                 f"Sebep: {reasons}"
                             )
                             await send_telegram(session, msg)
-                            print(f"✅ HACİM LİDERİ: {relvol_leader['symbol']} (RelVol: {relvol_leader['rel_vol']}x)")
                             last_signals[relvol_leader['symbol']] = now
-                            signal_history.append(relvol_leader['symbol'])
                             recent_signal_coins.append((relvol_leader['symbol'], now))
                             sent += 1
                             await asyncio.sleep(random.uniform(0.5, 1.0))
 
                     for r in all_res:
                         if sent >= MAX_SIGNALS_PER_ROUND: break
-                        if r['symbol'] in last_signals and now - last_signals[r['symbol']] < COOLDOWN: continue
+                        if r['symbol'] in last_signals and now - last_signals[r['symbol']] < COOLDOWN_BASE: continue
                         reasons = ", ".join(r['reasons'])
                         oi_str = f"%{r['oi']:.2f}" if r['oi'] != -999 else "N/A"
                         msg = (
@@ -995,11 +1012,8 @@ async def main():
                             f"Sebep: {reasons}"
                         )
                         await send_telegram(session, msg)
-                        print(f"✅ {r['symbol']} LONG (Puan: {r['score']}, RS: {r['rs']:.2f}, LS: {r['ls']})")
                         last_signals[r['symbol']] = now
-                        signal_history.append(r['symbol'])
                         recent_signal_coins.append((r['symbol'], now))
-                        
                         if r['symbol'] not in signal_tracker:
                             signal_tracker[r['symbol']] = {
                                 'price': r['price'],
@@ -1008,14 +1022,10 @@ async def main():
                                 'rs': r['rs'],
                                 'ls': r['ls']
                             }
-                        
                         sent += 1
                         await asyncio.sleep(random.uniform(0.5, 1.0))
-                    
+
                     if sent > 0: last_global = now
-                else:
-                    if all_res:
-                        print(f"⏳ Cooldown devrede. {all_res[0]['symbol']} bekliyor.")
 
                 if is_forced: pending_command = None
 
