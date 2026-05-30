@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (BUGFIX + BINANCE TR LİSTESİ GÜNCEL)
+# AYARLAR
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -46,6 +46,7 @@ STABLECOIN_BLACKLIST = {"USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT"}
 MAJOR_COINS_BLACKLIST = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
 
+# Binance TR spot listesi (BAT, TOM vb. coinler çıkarıldı)
 TR_COIN_LIST = sorted([
     "AAVEUSDT", "ACHUSDT", "ADAUSDT", "AGLDUSDT", "AKROUSDT",
     "ALGOUSDT", "ALICEUSDT", "ALPHAUSDT", "ANKRUSDT", "APEUSDT",
@@ -260,7 +261,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (BUGFIX)
+# SCAN COIN
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     btc_change, klines_1h, daily_change):
@@ -422,7 +423,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print(f"🚀 SADELEŞTİRİLMİŞ BOT (TR LİSTESİ)")
+    print(f"🚀 SADELEŞTİRİLMİŞ BOT (TR LİSTESİ TEMİZ)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
