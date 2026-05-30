@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (SADELEŞTİRİLDİ)
+# AYARLAR (BUGFIX + BINANCE TR LİSTESİ GÜNCEL)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -25,7 +25,7 @@ COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 2
 
-MIN_SCORE = 10  # TEK EŞİK
+MIN_SCORE = 10
 
 TP_MULT = 10
 SL_MULT = 5
@@ -47,37 +47,42 @@ MAJOR_COINS_BLACKLIST = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
 
 TR_COIN_LIST = sorted([
-    "AVAXUSDT", "LINKUSDT", "UNIUSDT", "MATICUSDT", "SHIBUSDT",
-    "ATOMUSDT", "NEARUSDT", "ALGOUSDT", "FTMUSDT",
-    "SANDUSDT", "MANAUSDT", "AXSUSDT", "GALAUSDT", "CHZUSDT", "ENJUSDT",
-    "HOTUSDT", "ZILUSDT", "BATUSDT", "CELOUSDT", "COMPUSDT", "CRVUSDT",
-    "DYDXUSDT", "EGLDUSDT", "FLOWUSDT", "GRTUSDT", "ICPUSDT", "KSMUSDT",
-    "LRUSDT", "MKRUSDT", "OMGUSDT", "QNTUSDT", "RENUSDT", "RSRUSDT",
-    "SKLUSDT", "SNXUSDT", "STORJUSDT", "SUSHIUSDT", "SXPUSDT", "UMAUSDT",
-    "YFIUSDT", "ZENUSDT", "ZRXUSDT", "1INCHUSDT", "AAVEUSDT",
-    "ACHUSDT", "AGLDUSDT", "AKROUSDT", "ALICEUSDT", "ALPHAUSDT", "ANKRUSDT",
-    "APEUSDT", "API3USDT", "ARPAUSDT", "AUDIOUSDT", "BAKEUSDT", "BANDUSDT",
-    "BELUSDT", "BLURUSDT", "BNTUSDT", "C98USDT", "CAKEUSDT", "COTIUSDT",
-    "CTSIUSDT", "CTXCUSDT", "CVCUSDT", "DARUSDT", "DENTUSDT", "DGBUSDT",
-    "DOCKUSDT", "DODOUSDT", "DUSKUSDT", "EDUUSDT", "ERNUSDT", "FETUSDT",
-    "FIDAUSDT", "FORTHUSDT", "FRONTUSDT", "FXSUSDT", "GTCUSDT", "HARDUSDT",
-    "HIGHUSDT", "ICXUSDT", "IDUSDT", "ILVUSDT", "IMXUSDT", "INJUSDT",
-    "IOSTUSDT", "IOTXUSDT", "JASMYUSDT", "JOEUSDT", "KAVAUSDT", "KDAUSDT",
-    "KLAYUSDT", "KNCUSDT", "LDOUSDT", "LINAUSDT", "LOOMUSDT",
-    "LPTUSDT", "LQTYUSDT", "LRCUSDT", "MAGICUSDT", "MASKUSDT", "MDTUSDT",
-    "MINAUSDT", "MLNUSDT", "MTLUSDT", "NKNUSDT", "NMRUSDT",
-    "OCEANUSDT", "OGNUSDT", "ONEUSDT", "ONTUSDT", "OPUSDT", "ORBSUSDT",
-    "OXTUSDT", "PENDLEUSDT", "PEOPLEUSDT", "PEPEUSDT", "PERLUSDT",
-    "PHAUSDT", "POLSUSDT", "PONDUSDT", "POWRUSDT", "PROMUSDT", "PYRUSDT",
-    "QIUSDT", "RADUSDT", "RAREUSDT", "REEFUSDT", "REIUSDT", "RLCUSDT",
-    "RNDRUSDT", "ROSEUSDT", "RPLUSDT", "RVNUSDT", "SCUSDT", "SFPUSDT",
-    "SLPUSDT", "SNTUSDT", "SPELLUSDT", "STGUSDT", "STMXUSDT", "STPTUSDT",
-    "STRAXUSDT", "SUIUSDT", "SUNUSDT", "SUPERUSDT", "TFUELUSDT",
-    "THETAUSDT", "TLMUSDT", "TOMOUSDT", "TRBUSDT", "TROYUSDT",
-    "TVKUSDT", "UNFIUSDT", "UTKUSDT", "VETUSDT", "VGXUSDT",
-    "VIDTUSDT", "VITEUSDT", "VOXELUSDT", "VTHOUSDT", "WAVESUSDT", "WAXPUSDT",
-    "WBTCUSDT", "WINUSDT", "WLDUSDT", "WOOUSDT", "WRXUSDT", "XECUSDT",
-    "XEMUSDT", "XLMUSDT", "XTZUSDT", "XVGUSDT", "YGGUSDT"
+    "AAVEUSDT", "ACHUSDT", "ADAUSDT", "AGLDUSDT", "AKROUSDT",
+    "ALGOUSDT", "ALICEUSDT", "ALPHAUSDT", "ANKRUSDT", "APEUSDT",
+    "API3USDT", "ARPAUSDT", "ATOMUSDT", "AUDIOUSDT", "AVAXUSDT",
+    "AXSUSDT", "BAKEUSDT", "BANDUSDT", "BATUSDT", "BELUSDT",
+    "BLURUSDT", "BNTUSDT", "C98USDT", "CAKEUSDT", "CELOUSDT",
+    "CHZUSDT", "COMPUSDT", "COTIUSDT", "CRVUSDT", "CTSIUSDT",
+    "CTXCUSDT", "CVCUSDT", "DARUSDT", "DENTUSDT", "DGBUSDT",
+    "DOCKUSDT", "DODOUSDT", "DOGEUSDT", "DOTUSDT", "DUSKUSDT",
+    "DYDXUSDT", "EDUUSDT", "EGLDUSDT", "ENJUSDT", "ERNUSDT",
+    "FETUSDT", "FIDAUSDT", "FLOWUSDT", "FORTHUSDT", "FRONTUSDT",
+    "FTMUSDT", "FXSUSDT", "GALAUSDT", "GRTUSDT", "GTCUSDT",
+    "HARDUSDT", "HIGHUSDT", "HOTUSDT", "ICPUSDT", "ICXUSDT",
+    "IDUSDT", "ILVUSDT", "IMXUSDT", "INJUSDT", "IOSTUSDT",
+    "IOTXUSDT", "JASMYUSDT", "JOEUSDT", "KAVAUSDT", "KDAUSDT",
+    "KLAYUSDT", "KNCUSDT", "KSMUSDT", "LDOUSDT", "LINAUSDT",
+    "LINKUSDT", "LOOMUSDT", "LPTUSDT", "LQTYUSDT", "LRCUSDT",
+    "LRUSDT", "LTCUSDT", "MAGICUSDT", "MANAUSDT", "MASKUSDT",
+    "MATICUSDT", "MDTUSDT", "MINAUSDT", "MKRUSDT", "MLNUSDT",
+    "MTLUSDT", "NEARUSDT", "NKNUSDT", "NMRUSDT", "OCEANUSDT",
+    "OGNUSDT", "OMGUSDT", "ONEUSDT", "ONTUSDT", "OPUSDT",
+    "ORBSUSDT", "OXTUSDT", "PENDLEUSDT", "PEOPLEUSDT", "PEPEUSDT",
+    "PERLUSDT", "PHAUSDT", "POLSUSDT", "PONDUSDT", "POWRUSDT",
+    "PROMUSDT", "PYRUSDT", "QIUSDT", "QNTUSDT", "RADUSDT",
+    "RAREUSDT", "REEFUSDT", "REIUSDT", "RENUSDT", "RLCUSDT",
+    "RNDRUSDT", "ROSEUSDT", "RPLUSDT", "RSRUSDT", "RVNUSDT",
+    "SANDUSDT", "SCUSDT", "SFPUSDT", "SHIBUSDT", "SKLUSDT",
+    "SLPUSDT", "SNTUSDT", "SNXUSDT", "SPELLUSDT", "STGUSDT",
+    "STMXUSDT", "STORJUSDT", "STPTUSDT", "STRAXUSDT", "SUIUSDT",
+    "SUNUSDT", "SUPERUSDT", "SUSHIUSDT", "SXPUSDT", "TFUELUSDT",
+    "THETAUSDT", "TLMUSDT", "TOMOUSDT", "TRBUSDT", "TRXUSDT",
+    "TROYUSDT", "TVKUSDT", "UMAUSDT", "UNFIUSDT", "UNIUSDT",
+    "UTKUSDT", "VETUSDT", "VGXUSDT", "VIDTUSDT", "VITEUSDT",
+    "VOXELUSDT", "VTHOUSDT", "WAVESUSDT", "WAXPUSDT", "WBTCUSDT",
+    "WINUSDT", "WLDUSDT", "WOOUSDT", "WRXUSDT", "XECUSDT",
+    "XEMUSDT", "XLMUSDT", "XTZUSDT", "XVGUSDT", "YFIUSDT",
+    "YGGUSDT", "ZENUSDT", "ZILUSDT", "ZRXUSDT", "1INCHUSDT"
 ])
 TR_COIN_LIST = [s for s in TR_COIN_LIST if s not in MAJOR_COINS_BLACKLIST]
 
@@ -191,7 +196,7 @@ async def get_cached(session, cache_name, key, base, endpoint, params, duration)
     return cache[cache_name].get(key, {}).get("data")
 
 # =========================================================
-# İNDİKATÖRLER (SADECE GEREKLİ OLANLAR)
+# İNDİKATÖRLER
 # =========================================================
 def calculate_ema(prices, period):
     if len(prices) < period: return None
@@ -221,9 +226,13 @@ def calculate_bollinger(prices, period=20, std_dev=2):
     return sma, sma + std_dev * std, sma - std_dev * std
 
 def calculate_atr(highs, lows, closes, period=10):
-    if len(highs) < period + 1: return None
-    tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(highs))]
-    return mean(tr[-period:])
+    n = min(len(highs), len(lows), len(closes))
+    if n < period + 1: return None
+    highs = highs[-n:]
+    lows = lows[-n:]
+    closes = closes[-n:]
+    tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, n)]
+    return mean(tr[-period:]) if len(tr) >= period else None
 
 # =========================================================
 # COIN LİSTESİ
@@ -251,13 +260,12 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (SADELEŞTİRİLMİŞ – SADECE 5 TEMEL FİLTRE)
+# SCAN COIN (BUGFIX)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     btc_change, klines_1h, daily_change):
     global recent_signal_coins
 
-    # Dinamik cooldown
     now = time.time()
     if symbol in last_signals:
         highs_dyn = [float(k[2]) for k in kl_5m[-30:-1]]
@@ -290,13 +298,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 
     if 0.99 < close_p < 1.01 and abs(change_pct) < 0.1: return None
 
-    # Coin bazlı hacim (30k minimum)
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
     min_quote = max(30_000, coin_median_vol * 0.30)
     if quote_vol < min_quote or abs(change_pct) > 8.0: return None
 
-    # === FİLTRE 1: Taker Buy RelVol ===
+    # RelVol
     taker_hist = [float(k[9]) for k in kl_5m[-7:-2]]
     avg_taker = mean(taker_hist) if taker_hist else tbuy
     rel_vol = round(tbuy / avg_taker, 2) if avg_taker > 0 else 0
@@ -304,7 +311,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if rel_vol < 1.0:
         return None
 
-    # === FİLTRE 2: RS (BTC'den bağımsız güç) ===
+    # RS
     closes = [float(k[4]) for k in closed[-24:]]
     if len(closes) >= 12:
         coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
@@ -315,10 +322,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if rs <= 0.2:
         return None
 
-    # === FİLTRE 3: CVD 30m trend ===
+    # CVD
     cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
 
-    # === FİLTRE 4: BB Squeeze ===
+    # BB Squeeze
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
     bb_width = (bb_upper - bb_lower) / bb_mid if bb_mid > 0 else 1
 
@@ -329,7 +336,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             bb_widths.append((bb[1] - bb[2]) / bb[0] if bb[0] > 0 else 1)
     is_squeezing = len(bb_widths) >= 10 and min(bb_widths[-10:]) < median(bb_widths) * 0.6
 
-    # === FİLTRE 5: LS 5m düşüşü ===
+    # LS
     ls_5m_change = 0.0
     if is_futures:
         try:
@@ -342,11 +349,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                 ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
         except: pass
 
-    # ========== SKORLAMA (BASİT) ==========
+    # ========== SKORLAMA ==========
     score = 0
     reasons = []
 
-    # RelVol
     if rel_vol > 3.0:
         score += 6; reasons.append("🔥🔥 RelVol")
     elif rel_vol > 2.0:
@@ -356,7 +362,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     else:
         score += 1
 
-    # RS
     if rs > 1.5:
         score += 5; reasons.append(f"🚀 RS {rs:.2f}")
     elif rs > 0.5:
@@ -364,37 +369,36 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     else:
         score += 1
 
-    # CVD
     if cvd_30 > 0:
         score += 4; reasons.append("📈 CVD Trend")
 
-    # BB Squeeze
     if is_squeezing:
         score += 5; reasons.append("🎯 BB Sıkışma")
 
-    # LS
     if ls_5m_change < -2:
         score += 3; reasons.append(f"📉 LS squeeze")
 
-    # Trend
     ema20_1h = calculate_ema([float(k[4]) for k in klines_1h[symbol]], 20) if symbol in klines_1h and klines_1h[symbol] is not None else None
     if ema20_1h is not None and close_p > ema20_1h:
         score += 2; reasons.append("1h↑")
 
-    # RSI dip
     rsi = calculate_rsi(closes, 14)
     if rsi is not None and 30 < rsi < 50:
         score += 2; reasons.append(f"RSI{rsi:.0f} dip")
 
-    # Aynı coin cezası
     if any(c == symbol for c, _ in recent_signal_coins):
         score -= 3
 
-    # ========== KARAR ==========
     if score < MIN_SCORE:
         return None
 
-    atr_val = calculate_atr([float(k[2]) for k in closed[-30:]], [float(k[3]) for k in closed[-30:]], closes)
+    # ATR hesaplama (garantili)
+    highs_30 = [float(k[2]) for k in closed[-30:]]
+    lows_30 = [float(k[3]) for k in closed[-30:]]
+    atr_val = calculate_atr(highs_30, lows_30, closes[-len(highs_30):])
+
+    if atr_val is None:
+        atr_val = close_p * 0.02
 
     conf = min(95, 55 + score * 3)
     tp_price = round(close_p + atr_val * 10, 4)
@@ -418,7 +422,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print(f"🚀 SADELEŞTİRİLMİŞ BOT")
+    print(f"🚀 SADELEŞTİRİLMİŞ BOT (TR LİSTESİ)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
