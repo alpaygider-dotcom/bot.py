@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (ALTCOIN ODAKLI – EŞİKLER DÜŞÜRÜLDÜ)
+# AYARLAR (AZ & KALİTELİ – SESSİZ BİRİKİM İÇİN OPTİMİZE)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -25,10 +25,10 @@ COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 3
 
-# Minimum skor eşikleri düşürüldü
-MIN_SCORE_BASE = 7
+# Min skor yükseltildi
+MIN_SCORE_BASE = 8
 MIN_SCORE_HIGH_VOLATILITY = 10
-MIN_SCORE_LOW_VOLATILITY = 5
+MIN_SCORE_LOW_VOLATILITY = 6
 
 TP_MULT = 10
 SL_MULT = 5
@@ -121,7 +121,7 @@ signal_tracker = {}
 recent_signal_coins = deque(maxlen=50)
 
 # =========================================================
-# TELEGRAM (HTML parse mode)
+# TELEGRAM (HTML)
 # =========================================================
 async def send_telegram(session, text):
     try:
@@ -317,14 +317,13 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (ALTCOIN ODAKLI – EŞİKLER DÜŞÜRÜLDÜ)
+# SCAN COIN (AZ & KALİTELİ – OPTİMİZE)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     btc_change, min_score,
                     klines_1h, klines_4h, klines_15m, daily_change, sector_strength):
     global watchlist, recent_signal_coins
 
-    # Dinamik cooldown (ATR yüzdesel)
     now = time.time()
     if symbol in last_signals:
         highs_dyn = [float(k[2]) for k in kl_5m[-30:-1]]
@@ -361,13 +360,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         price_1h_ago = float(closed[-13][4])
         if ((close_p - price_1h_ago) / price_1h_ago * 100) > 2.0: return None
 
-    # Coin bazlı hacim (düşük hacimli coinler için esnetildi)
+    # Coin bazlı hacim (düşük hacimli coinler için 50k ve 0.40 çarpan korundu)
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote = max(50_000, coin_median_vol * 0.40)  # 150k → 50k, 0.60 → 0.40
+    min_quote = max(50_000, coin_median_vol * 0.40)
     if quote_vol < min_quote or abs(change_pct) > 8.0: return None
 
-    # RelVol = Taker Buy Volume (eşik 1.0)
+    # RelVol = Taker Buy Volume (eşik 1.3)
     taker_hist = [float(k[9]) for k in kl_5m[-7:-2]]
     avg_taker = mean(taker_hist) if taker_hist else tbuy
     speed = tbuy / avg_taker if avg_taker > 0 else 0
@@ -375,7 +374,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 
     total_speed = vol / mean([float(k[5]) for k in kl_5m[-7:-2]]) if mean([float(k[5]) for k in kl_5m[-7:-2]]) > 0 else 0
 
-    if rel_vol < 1.0:  # 1.2 → 1.0
+    if rel_vol < 1.3:  # 1.0 → 1.3
         return None
 
     taker_r = tbuy / vol if vol > 0 else 0
@@ -399,11 +398,9 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
     bb_width = (bb_upper - bb_lower) / bb_mid if bb_mid > 0 else 1
 
-    # CVD
     cvd_5 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-6:-1]])
     cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
 
-    # BB Squeeze
     bb_widths = []
     for i in range(20, len(closes)):
         bb = calculate_bollinger(closes[:i], 20, 2)
@@ -411,13 +408,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             bb_widths.append((bb[1] - bb[2]) / bb[0] if bb[0] > 0 else 1)
     is_squeezing = len(bb_widths) >= 10 and min(bb_widths[-10:]) < median(bb_widths) * 0.6
 
-    # Konsolidasyon
     recent_20_high = max(highs[-20:]) if len(highs) >= 20 else high
     recent_20_low = min(lows[-20:]) if len(lows) >= 20 else low
     consolidation_range = (recent_20_high - recent_20_low) / close_p * 100 if close_p > 0 else 100
     is_consolidating = consolidation_range < 1.5
 
-    # UZUN VADELİ SIKIŞMA (24-48 saat)
     long_consolidation = False
     if symbol in klines_1h and klines_1h[symbol] is not None and len(klines_1h[symbol]) >= 48:
         h48_highs = [float(k[2]) for k in klines_1h[symbol][-48:]]
@@ -426,10 +421,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         if h48_range < 6.0:
             long_consolidation = True
 
-    # Artan taban
     higher_lows = len(lows) >= 4 and lows[-1] > lows[-2] > lows[-3]
 
-    # Hacim kuruması ve patlama
     volume_dryup_explosion = False
     if kl_1m and len(kl_1m) >= 12:
         recent_10_vols = [float(k[5]) for k in kl_1m[-11:-1]]
@@ -438,24 +431,22 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         if avg_10_vol > 0 and last_vol / avg_10_vol > 2.0 and mean(recent_10_vols[:5]) < avg_10_vol * 0.6:
             volume_dryup_explosion = True
 
-    # 🏆 ERKEN SKORLAMA (Ağır API'lerden önce)
     score = 0
     reasons = []
     squeeze = False
 
-    # YENİ: "Yeni yüz" bonusu (son 2 saatte sinyal vermemişse)
+    # Yeni yüz bonusu (hafif)
     new_face = not any(c == symbol for c, _ in recent_signal_coins)
     if new_face:
-        score += 2
-        reasons.append("🆕 Yeni Yüz")
+        score += 1
+        reasons.append("🆕")
 
-    # BTC düşerken direnen coin bonusu
     if btc_change < -0.5 and taker_r > 0.60:
         score += 10
         reasons.append("🛡️ BTC'ye Direnen")
 
     if abs(change_pct) < 0.5 and taker_r > 0.70:
-        score += 4
+        score += 5  # 4 → 5
         reasons.append("🤫 Sessiz Kurumsal Birikim")
 
     if is_squeezing:
@@ -573,7 +564,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
         score += 3; reasons.append("🔥 RelVol Yüksek")
     elif rel_vol > 1.8:
         score += 2; reasons.append("RelVol")
-    elif rel_vol > 1.0:
+    elif rel_vol > 1.3:
         score += 1
 
     # === İKİ AŞAMALI TARAMA ===
@@ -585,7 +576,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     ls_5m_change, ls_1h_change, ls_6h_change, ls_12h_change = 0.0, 0.0, 0.0, 0.0
 
     if is_futures and (score >= min_score - 2 or heavy):
-        # Funding + Mark Price TEK ÇAĞRI
         try:
             fund_data = await get_cached(session, "funding", symbol, FAPI_URL,
                                          "/fapi/v1/premiumIndex", {"symbol": symbol}, CACHE_FUNDING)
@@ -594,7 +584,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                 mark_price = float(fund_data.get("markPrice", 0))
         except: pass
 
-        # OI
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
                                        "/futures/data/openInterestHist",
@@ -607,7 +596,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     has_oi = True
         except: pass
 
-        # Order Book (limit 10)
         if heavy:
             try:
                 depth = await fetch_api(session, FAPI_URL, "/fapi/v1/depth",
@@ -622,7 +610,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             if mark_price > 0:
                 spot_premium = (close_p - mark_price) / mark_price * 100
 
-        # Iceberg
         if abs(change_pct) < 0.3 and taker_r > 0.65 and delta_r > 0:
             iceberg = True
             for i in range(1, 6):
@@ -634,7 +621,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                 score += 5
                 reasons.append("🧊 Iceberg Alım")
 
-        # LS 5m
         try:
             ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
                                     "/futures/data/globalLongShortAccountRatio",
@@ -704,14 +690,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if len(ls_details) >= 2:
         score += 3; reasons.append("Multi-TF LS squeeze")
 
-    # Sektör gücü (max 2)
     if sector_strength and symbol in sector_strength:
         sec_bonus = max(0, min(2, sector_strength[symbol]))
         if sec_bonus > 0:
             score += sec_bonus
             reasons.append(f"🔥 Sektör Gücü +{sec_bonus}")
 
-    # RS (RS KAPISI KALDIRILDI, sadece bonus)
+    # RS (0.1 kapısı)
     if len(closes) >= 24:
         coin_mom = (closes[-1] - closes[-24]) / closes[-24] * 100
         rs = coin_mom - btc_change
@@ -721,12 +706,14 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     else:
         rs = 0.0
 
+    if rs <= 0.1:  # HAFİF KAPI
+        return None
+
     if rs > 1.5:
         score += 4; reasons.append(f"🚀 RS {rs:.2f}")
     elif rs > 0.5:
         score += 2; reasons.append(f"✅ RS {rs:.2f}")
 
-    # Trend
     ema20_1h = calculate_ema([float(k[4]) for k in klines_1h[symbol]], 20) if symbol in klines_1h and klines_1h[symbol] is not None else None
     ema50_4h = calculate_ema([float(k[4]) for k in klines_4h[symbol]], 50) if symbol in klines_4h and klines_4h[symbol] is not None else None
     bull_struct = False
@@ -792,7 +779,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if len(categories) < 3:
         return None
 
-    # Watchlist kontrolü (60 dakika)
+    # Watchlist (45 dakika)
     if score >= min_score - 2:
         if symbol not in watchlist:
             watchlist[symbol] = {"time": time.time(), "score": score, "rs": rs}
@@ -843,11 +830,11 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, watchlist, recent_signal_coins
-    print(f"🚀 ALTCOIN AVCISI (EŞİKLER DÜŞÜRÜLDÜ)")
+    print(f"🚀 AZ & KALİTELİ SİNYAL BOTU")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 Altcoin Avcısı Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 Az & Kaliteli Sinyal Botu başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
         spot_symbols = await get_spot_symbols(session)
         futures_set = await get_futures_symbols(session)
@@ -865,7 +852,7 @@ async def main():
             while recent_signal_coins and now - recent_signal_coins[0][1] > COOLDOWN_BASE:
                 recent_signal_coins.popleft()
 
-            to_remove = [s for s, d in watchlist.items() if now - d["time"] > 3600]  # 60 dakika
+            to_remove = [s for s, d in watchlist.items() if now - d["time"] > 2700]  # 45 dakika
             for s in to_remove:
                 del watchlist[s]
 
