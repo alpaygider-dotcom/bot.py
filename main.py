@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR
+# AYARLAR (BİNANCE TR OTOMATİK LİSTE)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -18,7 +18,7 @@ if not BOT_TOKEN or not CHAT_ID:
     exit(1)
 
 FAPI_URL = "https://fapi.binance.com"
-SPOT_GLOBAL_URL = "https://api.binance.com"
+SPOT_TR_URL = "https://api.trbinance.com"
 
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
@@ -45,47 +45,6 @@ SEMAPHORE = asyncio.Semaphore(20)
 STABLECOIN_BLACKLIST = {"USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT"}
 MAJOR_COINS_BLACKLIST = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
-
-# Binance TR spot listesi (BAT, TOM vb. coinler çıkarıldı)
-TR_COIN_LIST = sorted([
-    "AAVEUSDT", "ACHUSDT", "ADAUSDT", "AGLDUSDT", "AKROUSDT",
-    "ALGOUSDT", "ALICEUSDT", "ALPHAUSDT", "ANKRUSDT", "APEUSDT",
-    "API3USDT", "ARPAUSDT", "ATOMUSDT", "AUDIOUSDT", "AVAXUSDT",
-    "AXSUSDT", "BAKEUSDT", "BANDUSDT", "BATUSDT", "BELUSDT",
-    "BLURUSDT", "BNTUSDT", "C98USDT", "CAKEUSDT", "CELOUSDT",
-    "CHZUSDT", "COMPUSDT", "COTIUSDT", "CRVUSDT", "CTSIUSDT",
-    "CTXCUSDT", "CVCUSDT", "DARUSDT", "DENTUSDT", "DGBUSDT",
-    "DOCKUSDT", "DODOUSDT", "DOGEUSDT", "DOTUSDT", "DUSKUSDT",
-    "DYDXUSDT", "EDUUSDT", "EGLDUSDT", "ENJUSDT", "ERNUSDT",
-    "FETUSDT", "FIDAUSDT", "FLOWUSDT", "FORTHUSDT", "FRONTUSDT",
-    "FTMUSDT", "FXSUSDT", "GALAUSDT", "GRTUSDT", "GTCUSDT",
-    "HARDUSDT", "HIGHUSDT", "HOTUSDT", "ICPUSDT", "ICXUSDT",
-    "IDUSDT", "ILVUSDT", "IMXUSDT", "INJUSDT", "IOSTUSDT",
-    "IOTXUSDT", "JASMYUSDT", "JOEUSDT", "KAVAUSDT", "KDAUSDT",
-    "KLAYUSDT", "KNCUSDT", "KSMUSDT", "LDOUSDT", "LINAUSDT",
-    "LINKUSDT", "LOOMUSDT", "LPTUSDT", "LQTYUSDT", "LRCUSDT",
-    "LRUSDT", "LTCUSDT", "MAGICUSDT", "MANAUSDT", "MASKUSDT",
-    "MATICUSDT", "MDTUSDT", "MINAUSDT", "MKRUSDT", "MLNUSDT",
-    "MTLUSDT", "NEARUSDT", "NKNUSDT", "NMRUSDT", "OCEANUSDT",
-    "OGNUSDT", "OMGUSDT", "ONEUSDT", "ONTUSDT", "OPUSDT",
-    "ORBSUSDT", "OXTUSDT", "PENDLEUSDT", "PEOPLEUSDT", "PEPEUSDT",
-    "PERLUSDT", "PHAUSDT", "POLSUSDT", "PONDUSDT", "POWRUSDT",
-    "PROMUSDT", "PYRUSDT", "QIUSDT", "QNTUSDT", "RADUSDT",
-    "RAREUSDT", "REEFUSDT", "REIUSDT", "RENUSDT", "RLCUSDT",
-    "RNDRUSDT", "ROSEUSDT", "RPLUSDT", "RSRUSDT", "RVNUSDT",
-    "SANDUSDT", "SCUSDT", "SFPUSDT", "SHIBUSDT", "SKLUSDT",
-    "SLPUSDT", "SNTUSDT", "SNXUSDT", "SPELLUSDT", "STGUSDT",
-    "STMXUSDT", "STORJUSDT", "STPTUSDT", "STRAXUSDT", "SUIUSDT",
-    "SUNUSDT", "SUPERUSDT", "SUSHIUSDT", "SXPUSDT", "TFUELUSDT",
-    "THETAUSDT", "TLMUSDT", "TOMOUSDT", "TRBUSDT", "TRXUSDT",
-    "TROYUSDT", "TVKUSDT", "UMAUSDT", "UNFIUSDT", "UNIUSDT",
-    "UTKUSDT", "VETUSDT", "VGXUSDT", "VIDTUSDT", "VITEUSDT",
-    "VOXELUSDT", "VTHOUSDT", "WAVESUSDT", "WAXPUSDT", "WBTCUSDT",
-    "WINUSDT", "WLDUSDT", "WOOUSDT", "WRXUSDT", "XECUSDT",
-    "XEMUSDT", "XLMUSDT", "XTZUSDT", "XVGUSDT", "YFIUSDT",
-    "YGGUSDT", "ZENUSDT", "ZILUSDT", "ZRXUSDT", "1INCHUSDT"
-])
-TR_COIN_LIST = [s for s in TR_COIN_LIST if s not in MAJOR_COINS_BLACKLIST]
 
 cache = {"funding": {}, "oi": {}, "ls_5m": {}, "klines_1m": {}, "klines_5m": {}, "klines_1h": {}}
 last_signals = {}
@@ -149,7 +108,7 @@ async def generate_report(session):
     for symbol, data in signal_tracker.items():
         entry_price = data['price']
         try:
-            ticker = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/ticker/price", {"symbol": symbol})
+            ticker = await fetch_api(session, FAPI_URL, "/fapi/v1/ticker/price", {"symbol": symbol})
             current_price = float(ticker['price']) if ticker else entry_price
             change_pct = ((current_price - entry_price) / entry_price) * 100
             elapsed = (time.time() - data['time']) / 3600
@@ -236,10 +195,21 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:]) if len(tr) >= period else None
 
 # =========================================================
-# COIN LİSTESİ
+# BİNANCE TR LİSTESİ (OTOMATİK)
 # =========================================================
-async def get_spot_symbols(session):
-    return {s for s in TR_COIN_LIST if s not in COMMODITY_BLACKLIST}
+async def get_tr_spot_symbols(session):
+    """Binance TR API'sinden güncel USDT spot çiftlerini çeker."""
+    info = await fetch_api(session, SPOT_TR_URL, "/api/v3/exchangeInfo")
+    if not info:
+        print("❌ Binance TR API'sine erişilemedi!")
+        return set()
+    symbols = set()
+    for s in info.get("symbols", []):
+        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+            sym = s["symbol"]
+            if sym not in STABLECOIN_BLACKLIST and sym not in COMMODITY_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST:
+                symbols.add(sym)
+    return symbols
 
 async def get_futures_symbols(session):
     info = await fetch_api(session, FAPI_URL, "/fapi/v1/exchangeInfo")
@@ -251,7 +221,7 @@ async def get_futures_symbols(session):
 
 async def get_daily_change_map(session, symbols):
     cmap = {}
-    data = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/ticker/24hr")
+    data = await fetch_api(session, FAPI_URL, "/fapi/v1/ticker/24hr")
     if data:
         for item in data:
             s = item.get("symbol", "")
@@ -423,16 +393,20 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print(f"🚀 SADELEŞTİRİLMİŞ BOT (TR LİSTESİ TEMİZ)")
+    print(f"🚀 BİNANCE TR OTOMATİK LİSTE")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
-        await send_telegram(session, f"🎯 Sade Bot başlatıldı ({len(TR_COIN_LIST)} coin) | /report")
 
-        spot_symbols = await get_spot_symbols(session)
+        # Binance TR listesini canlı çek
+        COIN_LIST = sorted(await get_tr_spot_symbols(session))
+        if not COIN_LIST:
+            await send_telegram(session, "❌ Binance TR liste alınamadı!")
+            return
+
         futures_set = await get_futures_symbols(session)
-        COIN_LIST = sorted(spot_symbols)
-        print(f"✅ {len(COIN_LIST)} altcoin taranıyor")
+        await send_telegram(session, f"🎯 Bot başlatıldı ({len(COIN_LIST)} TR coin) | /report")
+        print(f"✅ {len(COIN_LIST)} TR coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
 
@@ -447,7 +421,7 @@ async def main():
 
             try:
                 t0 = time.time()
-                daily_map = await get_daily_change_map(session, spot_symbols)
+                daily_map = await get_daily_change_map(session, set(COIN_LIST))
 
                 btc = await fetch_api(session, FAPI_URL, "/fapi/v1/klines",
                                       {"symbol": "BTCUSDT", "interval": "15m", "limit": 10})
@@ -473,7 +447,7 @@ async def main():
 
                 tasks_5m = []
                 for s in COIN_LIST:
-                    base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
+                    base = FAPI_URL if s in futures_set else SPOT_TR_URL
                     ep = "/fapi/v1/klines" if s in futures_set else "/api/v3/klines"
                     tasks_5m.append(get_cached(session, "klines_5m", s, base, ep,
                                                {"symbol": s, "interval": "5m", "limit": 50}, CACHE_5M))
