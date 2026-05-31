@@ -26,7 +26,7 @@ SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 2
-MIN_SCORE = 25          # 20 → 25 (daha seçici)
+MIN_SCORE = 30          # 25 → 30
 
 TP_MULT = 10
 SL_MULT = 5
@@ -325,7 +325,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (FİLTRELER SIKILAŞTIRILDI)
+# SCAN COIN (DAHA DA SIKILAŞTIRILDI)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -381,8 +381,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     taker_hist = [float(k[9]) for k in kl_5m[-7:-2]]
     avg_taker = mean(taker_hist) if taker_hist else tbuy
     rel_vol = round(tbuy / avg_taker, 2) if avg_taker > 0 else 0
-    # RelVol alt eşiği 1.0'a yükseltildi
-    if rel_vol < 1.0:
+    # RelVol alt eşiği 1.5
+    if rel_vol < 1.5:
         return None
 
     closes = [float(k[4]) for k in closed[-40:]]
@@ -399,37 +399,37 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     if rs < -1.5:
         return None
 
-    # CVD - Daha sıkı divergence şartı
+    # CVD - daha sıkı divergence
     cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
     cvd_prev = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-14:-7]])
     price_10ago = float(closed[-10][4])
     price_change_10 = ((close_p - price_10ago) / price_10ago) * 100
-    cvd_divergence = (abs(price_change_10) < 0.5) and (cvd_30 > cvd_prev * 1.2)  # %1 → %0.5
+    cvd_divergence = (abs(price_change_10) < 0.3) and (cvd_30 > cvd_prev * 1.2)
 
-    # BB
+    # BB - daha sıkı sıkışma
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
     bb_widths = []
     for i in range(20, len(closes)):
         bb = calculate_bollinger(closes[:i], 20, 2)
         if bb[0] is not None:
             bb_widths.append((bb[1] - bb[2]) / bb[0] if bb[0] > 0 else 1)
-    is_squeezing = len(bb_widths) >= 10 and min(bb_widths[-10:]) < median(bb_widths) * 0.6
+    is_squeezing = len(bb_widths) >= 10 and min(bb_widths[-10:]) < median(bb_widths) * 0.5
 
-    # ATR
+    # ATR - daha net daralma
     atr_now = calculate_atr(highs[-20:], lows[-20:], closes[-20:], 14)
     atr_old = calculate_atr(highs[-34:-14], lows[-34:-14], closes[-34:-14], 14)
-    volatility_squeeze = atr_now and atr_old and atr_old > 0 and atr_now < atr_old * 0.75
+    volatility_squeeze = atr_now and atr_old and atr_old > 0 and atr_now < atr_old * 0.70
 
-    # Hacim kuruması - rel_vol şartı 1.2'ye geri döndü
+    # Hacim kuruması - rel_vol 1.5
     recent_vols = [float(k[5]) for k in kl_5m[-10:-1]]
     avg_vol = mean(recent_vols) if recent_vols else vol
-    volume_dryup = (vol < avg_vol * 0.5) and (rel_vol > 1.2)
+    volume_dryup = (vol < avg_vol * 0.5) and (rel_vol > 1.5)
 
-    # Tepeye mesafe
+    # Tepeye mesafe / kırılım baskısı (rel_vol 2.0)
     high_30 = max([float(k[2]) for k in kl_5m[-31:-1]]) if len(kl_5m) >= 31 else high
     distance_to_high = ((high_30 - close_p) / close_p) * 100 if close_p > 0 else 100
     near_breakout = distance_to_high < 2.5
-    breakout_pressure = near_breakout and (rel_vol > 1.5)
+    breakout_pressure = near_breakout and (rel_vol > 2.0)
 
     # Hacim ivmesi
     last_3_vol = sum(volumes[-3:])
@@ -471,8 +471,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
                     pass
         except: pass
 
-    # OI + Fiyat Yataylığı - Daha sıkı yataylık
-    oi_flat_price = (oi_change_pct > 1.5) and (abs(change_5) < 0.2)  # %0.3 → %0.2
+    # OI + Fiyat Yataylığı - OI eşiği 2.0, fiyat değişimi %0.2
+    oi_flat_price = (oi_change_pct > 2.0) and (abs(change_5) < 0.2)
 
     # Funding Rate
     funding_rate = 0.0
@@ -494,7 +494,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     elif rel_vol > 2.0: score += 3; reasons.append("🔥 RelVol (alıcı oranının yüksekliği)")
     elif rel_vol > 1.5: score += 1; reasons.append("RelVol (alıcı oranının yüksekliği)")
 
-    # Net Taker Buy (puan azaltıldı)
     if strong_buy_pressure: score += 2; reasons.append("📊 Net Alıcı Baskısı")
 
     # RS
@@ -522,7 +521,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     elif oi_change_pct > 1.0: score += 3; reasons.append(f"📊 OI Artışı %{oi_change_pct:.1f}")
     elif oi_change_pct < -1.0: score -= 2
 
-    # Funding Rate (ceza artırıldı)
+    # Funding Rate
     if funding_rate < -0.001: score += 3; reasons.append(f"💸 Negatif Funding %{funding_rate*100:.2f}")
     elif funding_rate > 0.001: score -= 3
 
@@ -572,7 +571,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU (Filtreler Sıkılaştırıldı)")
+    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU (Ultra Sıkı Filtreler)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
@@ -580,7 +579,7 @@ async def main():
 
         COIN_LIST = get_tr_coin_list()
         futures_set = await get_futures_symbols(session)
-        await send_telegram(session, f"🎯 Sıkı Filtreli Erken Sinyal Botu ({len(COIN_LIST)} TR coin) | /report")
+        await send_telegram(session, f"🎯 Ultra Sıkı Erken Sinyal ({len(COIN_LIST)} TR coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
