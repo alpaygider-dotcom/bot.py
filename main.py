@@ -20,7 +20,6 @@ if not BOT_TOKEN or not CHAT_ID:
 
 FAPI_URL = "https://fapi.binance.com"
 SPOT_GLOBAL_URL = "https://api.binance.com"
-TR_API_URL = "https://api.binance.tr"
 
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
@@ -198,39 +197,33 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:]) if len(tr) >= period else None
 
 # =========================================================
-# COIN LİSTESİ (SADECE BINANCE TR)
+# COIN LİSTESİ (GLOBAL SPOT API ÜZERİNDEN TR COINLERİ)
 # =========================================================
-async def get_symbols_tr(session):
-    """Binance TR API'den coin listesini çeker, hata alırsa dosyadan okur."""
-    url = f"{TR_API_URL}/open/v1/common/symbols"
-    try:
-        resp = await fetch(session, url)
-        if resp and resp.get("code") == 200:
-            symbols = []
-            for s in resp.get("data", []):
-                sym = s.get("symbol", "")
-                if sym and sym not in STABLECOIN_BLACKLIST \
-                   and sym not in COMMODITY_BLACKLIST \
-                   and sym not in MAJOR_COINS_BLACKLIST:
-                    symbols.append(sym)
-            if len(symbols) > 50:
-                with open(TR_LIST_FILE, "w") as f:
-                    json.dump(symbols, f)
-                print(f"✅ Binance TR API: {len(symbols)} coin")
-                return symbols
-    except Exception as e:
-        print(f"⚠️ TR API hatası: {e}")
+async def get_tr_spot_symbols_from_global(session):
+    """Global exchangeInfo'dan aktif USDT spot çiftlerini al, TR listesi olarak kullan."""
+    url = f"{SPOT_GLOBAL_URL}/api/v3/exchangeInfo"
+    resp = await fetch(session, url)
+    if resp and "symbols" in resp:
+        symbols = []
+        for s in resp["symbols"]:
+            if (s.get("quoteAsset") == "USDT" and
+                s.get("status") == "TRADING" and
+                s.get("isSpotTradingAllowed") and
+                s["symbol"] not in STABLECOIN_BLACKLIST and
+                s["symbol"] not in MAJOR_COINS_BLACKLIST and
+                s["symbol"] not in COMMODITY_BLACKLIST):
+                symbols.append(s["symbol"])
+        if len(symbols) > 50:
+            with open(TR_LIST_FILE, "w") as f:
+                json.dump(symbols, f)
+            print(f"✅ Global Spot API: {len(symbols)} coin listelendi.")
+            return symbols
 
     if os.path.exists(TR_LIST_FILE):
-        try:
-            with open(TR_LIST_FILE, "r") as f:
-                symbols = json.load(f)
-                if len(symbols) > 50:
-                    print(f"📂 Yedek listeden {len(symbols)} coin yüklendi.")
-                    return symbols
-        except:
-            pass
-
+        with open(TR_LIST_FILE, "r") as f:
+            symbols = json.load(f)
+            print(f"📂 Yedek listeden {len(symbols)} coin yüklendi.")
+            return symbols
     print("❌ Coin listesi alınamadı!")
     return []
 
@@ -254,7 +247,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (ERKEN YAKALAMA FİLTRELERİYLE)
+# SCAN COIN (TÜM FİLTRELER KORUNDU)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                     btc_change, klines_1h, daily_change):
@@ -290,7 +283,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     )
     change_pct = ((close_p - open_p) / open_p) * 100
 
-    # son 5 mumda %3.5'ten fazla yükseldiyse geç
     if len(closed) >= 5:
         open_5 = float(closed[-5][1])
         change_5 = ((close_p - open_5) / open_5) * 100
@@ -440,12 +432,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU (Binance TR Odaklı)")
+    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU (Global API / TR Spot)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
 
-        COIN_LIST = await get_symbols_tr(session)          # sadece Binance TR coinleri
+        COIN_LIST = await get_tr_spot_symbols_from_global(session)
         futures_set = await get_futures_symbols(session)
         await send_telegram(session, f"🎯 Patlama Öncesi Bot ({len(COIN_LIST)} TR coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
