@@ -26,7 +26,7 @@ SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 120
 MAX_SIGNALS_PER_ROUND = 2
-MIN_SCORE = 22  # 25'ten düşürüldü
+MIN_SCORE = 30  # 22'den 30'a çıkarıldı
 
 TP_MULT = 10
 SL_MULT = 5
@@ -447,7 +447,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (DİP DÖNÜŞÜ - DELTA DIVERGENCE ZORUNLU)
+# SCAN COIN (DİP DÖNÜŞÜ - MIN_SCORE=30)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -494,7 +494,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     if len(closed) >= 5:
         open_5 = float(closed[-5][1])
         change_5 = ((close_p - open_5) / open_5) * 100
-        if change_5 > 2.0:  # yükselmişse ele
+        if change_5 > 2.0:
             return None
     else:
         change_5 = 0.0
@@ -520,10 +520,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     adjusted_rel_vol = raw_rel_vol * min(buy_sell_ratio, 2.0)
 
-    if buy_sell_ratio < 1.0 or change_pct < -1.5:  # düşüşte alıcı yoksa sıfırla
+    if buy_sell_ratio < 1.0 or change_pct < -1.5:
         adjusted_rel_vol = 0.0
-
-    # RelVol alt eşiği kaldırıldı (delta divergence zorunlu olacak)
 
     closes = [float(k[4]) for k in closed[-40:]]
     highs = [float(k[2]) for k in closed[-40:]]
@@ -580,7 +578,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     if bb_mid and bb_upper and bb_lower and bb_upper != bb_lower:
         bb_position = (close_p - bb_mid) / (bb_upper - bb_lower)
         near_bb_lower = bb_position < -0.3
-        # BB alt bandından dönüş: önceki mum alt bandın altında, şimdi içinde
         if len(closed) >= 2:
             prev_close = float(closed[-2][4])
             prev_bb_pos = (prev_close - bb_mid) / (bb_upper - bb_lower) if bb_upper != bb_lower else 0
@@ -762,14 +759,14 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     # 15dk trend cezası
     if not trend_15m_up:
-        score -= 2  # -4'ten -2'ye düşürüldü (dip zaten düşüşte olur)
+        score -= 2
         reasons.append("⚠️ 15dk düşüş trendi")
 
-    # Kırmızı mum baskısı (hafifletildi)
+    # Kırmızı mum baskısı
     if len(closed) >= 10:
         last_10 = closed[-10:]
         red_count = sum(1 for c in last_10 if float(c[4]) < float(c[1]))
-        if red_count >= 8:  # 6'dan 8'e
+        if red_count >= 8:
             score -= 2
             reasons.append("🔴 Yoğun kırmızı mum")
 
@@ -798,7 +795,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU + LIQUIDATION MONITOR")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU + LIQUIDATION MONITOR (MIN_SCORE=30)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
