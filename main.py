@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timedelta
 
 # =========================================================
-# AYARLAR (MEVCUT KORUNDU)
+# AYARLAR (GÜNCELLENDİ)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -24,7 +24,7 @@ SPOT_GLOBAL_URL = "https://api.binance.com"
 
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
-GLOBAL_COOLDOWN = 90
+GLOBAL_COOLDOWN = 120      # 90 → 120 (spam azaltma)
 MAX_SIGNALS_PER_ROUND = 2
 MIN_SCORE = 30
 
@@ -34,7 +34,7 @@ MAX_TP_PCT = 8.0
 
 CACHE_5M = 35
 CACHE_1H = 300
-CACHE_OI = 120
+CACHE_OI = 60            # 120 → 60 (daha güncel)
 CACHE_FUNDING = 300
 CACHE_LS_5M = 60
 
@@ -112,12 +112,15 @@ daily_tracker = {}
 daily_report_lock = asyncio.Lock()
 
 # =========================================================
-# LONG LIQUIDATION MONITOR DEĞİŞKENLERİ
+# LONG LIQUIDATION MONITOR (GÜNCELLENDİ)
 # =========================================================
 futures_alarm_cooldown = {}
 FUTURES_ALARM_COOLDOWN = 3600
-LS_DROP_5M_THRESHOLD = -3.0    # 5dk'da %3 düşüş
-LS_DROP_1H_THRESHOLD = -8.0    # 1 saatte %8 düşüş
+
+LS_DROP_5M_THRESHOLD = -5.0
+OI_DROP_5M_THRESHOLD = -3.0
+PRICE_DROP_5M_THRESHOLD = -1.0
+LIQUIDATION_SCORE_THRESHOLD = 7  # 8 → 7
 
 # =========================================================
 # TELEGRAM
@@ -218,7 +221,7 @@ async def midnight_reporter(session):
             daily_tracker.clear()
 
 # =========================================================
-# LONG LIQUIDATION MONITOR (LONG/SHORT ORANINA GÖRE)
+# LONG LIQUIDATION MONITOR (FİYAT ZORUNLU ŞART)
 # =========================================================
 async def futures_crash_monitor(session):
     global bot_running
@@ -226,7 +229,7 @@ async def futures_crash_monitor(session):
     futures_set = await get_futures_symbols(session)
     monitor_list = [s for s in tr_symbols if s in futures_set]
 
-    print(f"🛡️ LONG LIQUIDATION MONITOR ({len(monitor_list)} futures)")
+    print(f"🛡️ LONG LIQUIDATION MONITOR ({len(monitor_list)} futures) [Üçlü Teyit]")
     await send_telegram(session, f"🛡️ LONG LIQUIDATION MONITOR ({len(monitor_list)} coin)")
 
     while True:
@@ -238,41 +241,89 @@ async def futures_crash_monitor(session):
             now = time.time()
             for i in range(0, len(monitor_list), BATCH_SIZE):
                 batch = monitor_list[i:i+BATCH_SIZE]
-                tasks = []
+
+                ls_tasks = []
+                oi_tasks = []
+                price_tasks = []
                 for sym in batch:
-                    tasks.append(fetch_api(session, FAPI_URL,
-                                           "/futures/data/globalLongShortAccountRatio",
-                                           {"symbol": sym, "period": "5m", "limit": 12}))
-                results = await asyncio.gather(*tasks)
+                    ls_tasks.append(fetch_api(session, FAPI_URL,
+                                              "/futures/data/globalLongShortAccountRatio",
+                                              {"symbol": sym, "period": "5m", "limit": 2}))
+                    oi_tasks.append(fetch_api(session, FAPI_URL,
+                                              "/futures/data/openInterestHist",
+                                              {"symbol": sym, "period": "5m", "limit": 2}))
+                    price_tasks.append(fetch_api(session, FAPI_URL,
+                                                 "/fapi/v1/klines",
+                                                 {"symbol": sym, "interval": "5m", "limit": 2}))
 
-                for sym, data in zip(batch, results):
-                    if not data or len(data) < 2:
-                        continue
-                    ratios = [float(d["longShortRatio"]) for d in data if "longShortRatio" in d]
-                    if len(ratios) < 12:
-                        continue
+                ls_results = await asyncio.gather(*ls_tasks)
+                oi_results = await asyncio.gather(*oi_tasks)
+                price_results = await asyncio.gather(*price_tasks)
 
-                    change_5m = ((ratios[-1] - ratios[-2]) / ratios[-2]) * 100 if ratios[-2] != 0 else 0
-                    change_1h = ((ratios[-1] - ratios[0]) / ratios[0]) * 100 if ratios[0] != 0 else 0
+                for sym, ls_data, oi_data, klines in zip(batch, ls_results, oi_results, price_results):
+                    score = 0
+                    details = []
+                    current_price = "N/A"  # başlangıç değeri
 
-                    alarm = False
-                    reason = ""
-                    if change_5m < LS_DROP_5M_THRESHOLD:
-                        alarm = True
-                        reason = f"5dk Long/Short düşüşü %{change_5m:.1f}"
-                    elif change_1h < LS_DROP_1H_THRESHOLD:
-                        alarm = True
-                        reason = f"1 saat Long/Short düşüşü %{change_1h:.1f}"
+                    # L/S oranı
+                    ls_change = 0.0
+                    if ls_data and len(ls_data) >= 2:
+                        try:
+                            prev_ls = float(ls_data[-2]["longShortRatio"])
+                            curr_ls = float(ls_data[-1]["longShortRatio"])
+                            if prev_ls > 0:
+                                ls_change = ((curr_ls - prev_ls) / prev_ls) * 100
+                        except (KeyError, TypeError, ZeroDivisionError):
+                            pass
 
-                    if alarm:
+                    if ls_change < LS_DROP_5M_THRESHOLD:
+                        score += 3
+                        details.append(f"L/S: %{ls_change:.1f}")
+
+                    # OI
+                    oi_change = 0.0
+                    if oi_data and len(oi_data) >= 2:
+                        try:
+                            prev_oi = float(oi_data[-2]["sumOpenInterest"])
+                            curr_oi = float(oi_data[-1]["sumOpenInterest"])
+                            if prev_oi > 0:
+                                oi_change = ((curr_oi - prev_oi) / prev_oi) * 100
+                        except (KeyError, TypeError, ZeroDivisionError):
+                            pass
+
+                    if oi_change < OI_DROP_5M_THRESHOLD:
+                        score += 4
+                        details.append(f"OI: %{oi_change:.1f}")
+
+                    # Fiyat
+                    price_change = 0.0
+                    if klines and len(klines) >= 2:
+                        try:
+                            prev_close = float(klines[0][4])
+                            curr_close = float(klines[1][4])
+                            current_price = f"{curr_close:.6f}"
+                            if prev_close > 0:
+                                price_change = ((curr_close - prev_close) / prev_close) * 100
+                        except (IndexError, TypeError, ValueError):
+                            pass
+
+                    # ZORUNLU: fiyat düşmüş olmalı
+                    if price_change >= PRICE_DROP_5M_THRESHOLD:
+                        continue  # fiyat yeterince düşmemişse hiç alarm verme
+
+                    if price_change < PRICE_DROP_5M_THRESHOLD:
+                        score += 3
+                        details.append(f"Fiyat: %{price_change:.1f}")
+
+                    if score >= LIQUIDATION_SCORE_THRESHOLD:
                         last_alarm = futures_alarm_cooldown.get(sym, 0)
                         if now - last_alarm < FUTURES_ALARM_COOLDOWN:
                             continue
                         msg = (f"🔻 <b>LONG LIQUIDATION ALARM</b>\n"
                                f"<b>{sym}</b>\n"
-                               f"{reason}\n"
-                               f"Long/Short Oranı: {ratios[-1]:.4f}\n"
-                               f"5dk önce: {ratios[-2]:.4f} | 1s önce: {ratios[0]:.4f}")
+                               f"Skor: {score}/10\n"
+                               f"{', '.join(details)}\n"
+                               f"Fiyat: {current_price}")
                         await send_telegram(session, msg)
                         futures_alarm_cooldown[sym] = now
 
@@ -282,7 +333,7 @@ async def futures_crash_monitor(session):
             print(f"Liquidation monitor error: {e}")
             traceback.print_exc()
 
-        await asyncio.sleep(300)  # 5 dakika
+        await asyncio.sleep(300)
 
 # =========================================================
 # API (MEVCUT KORUNDU)
@@ -400,7 +451,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (MEVCUT KORUNDU)
+# SCAN COIN (GÜNCELLENDİ)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -469,7 +520,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     if buy_sell_ratio < 1.0 or change_pct < -0.3:
         adjusted_rel_vol = 0.0
 
-    if adjusted_rel_vol < 1.5:
+    # Alt eşik 1.2'ye düşürüldü (sessiz toplanan coinleri kaçırmamak için)
+    if adjusted_rel_vol < 1.2:
         return None
 
     closes = [float(k[4]) for k in closed[-40:]]
@@ -477,10 +529,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     lows = [float(k[3]) for k in closed[-40:]]
     volumes = [float(k[5]) for k in closed[-40:]]
 
-    # RS
+    # RS (BTC ile aynı timeframe)
     if len(closes) >= 12:
         coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
-        rs = coin_mom - btc_change
+        rs = coin_mom - btc_change  # BTC change artık 12 mum 5dk
     else:
         rs = 0.0
     if rs < -1.5:
@@ -569,13 +621,15 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
                 funding_rate = float(fr_data[0]["fundingRate"])
         except: pass
 
-    # ========== SKORLAMA ==========
+    # ========== SKORLAMA (GÜNCELLENDİ) ==========
     score = 0
     reasons = []
 
+    # RelVol (kademeli)
     if adjusted_rel_vol > 3.0: score += 5; reasons.append("🔥🔥 RelVol (alıcı oranının yüksekliği)")
     elif adjusted_rel_vol > 2.0: score += 3; reasons.append("🔥 RelVol (alıcı oranının yüksekliği)")
-    elif adjusted_rel_vol > 1.5: score += 1; reasons.append("RelVol (alıcı oranının yüksekliği)")
+    elif adjusted_rel_vol > 1.5: score += 2; reasons.append("RelVol (alıcı oranının yüksekliği)")
+    elif adjusted_rel_vol > 1.2: score += 1; reasons.append("RelVol düşük")
 
     if strong_buy_pressure: score += 2; reasons.append("📊 Net Alıcı Baskısı")
 
@@ -599,8 +653,9 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     elif oi_change_pct > 1.0: score += 3; reasons.append(f"📊 OI Artışı %{oi_change_pct:.1f}")
     elif oi_change_pct < -1.0: score -= 2
 
+    # Funding cezası hafifletildi
     if funding_rate < -0.001: score += 3; reasons.append(f"💸 Negatif Funding %{funding_rate*100:.2f}")
-    elif funding_rate > 0.001: score -= 3
+    elif funding_rate > 0.002: score -= 2
 
     ema9 = calculate_ema(closes, 9)
     ema21 = calculate_ema(closes, 21)
@@ -643,20 +698,20 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     }
 
 # =========================================================
-# MAIN (LONG LIQUIDATION MONITOR EKLENDİ)
+# MAIN
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU + LONG LIQUIDATION MONITOR")
+    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU + LONG LIQUIDATION MONITOR (Son Versiyon)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
         asyncio.create_task(midnight_reporter(session))
-        asyncio.create_task(futures_crash_monitor(session))  # YENİ
+        asyncio.create_task(futures_crash_monitor(session))
 
         COIN_LIST = get_tr_coin_list()
         futures_set = await get_futures_symbols(session)
-        await send_telegram(session, f"🎯 Akıllı Sinyal Botu ({len(COIN_LIST)} TR coin) | /report")
+        await send_telegram(session, f"🎯 Sinyal + Likidasyon Botu ({len(COIN_LIST)} TR coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
@@ -671,12 +726,16 @@ async def main():
             try:
                 t0 = time.time()
                 daily_map = await get_daily_change_map(session, set(COIN_LIST))
-                btc = await fetch_api(session, FAPI_URL, "/fapi/v1/klines",
-                                      {"symbol": "BTCUSDT", "interval": "15m", "limit": 10})
+
+                # BTC değişimi aynı timeframe (12 mum 5dk)
+                btc_klines = await fetch_api(session, FAPI_URL, "/fapi/v1/klines",
+                                             {"symbol": "BTCUSDT", "interval": "5m", "limit": 13})
                 btc_change = 0.0
-                if btc:
-                    bo, bc = float(btc[-2][1]), float(btc[-2][4])
-                    btc_change = ((bc - bo) / bo) * 100
+                if btc_klines and len(btc_klines) >= 13:
+                    btc_open = float(btc_klines[0][1])
+                    btc_close = float(btc_klines[-2][4])
+                    if btc_open > 0:
+                        btc_change = ((btc_close - btc_open) / btc_open) * 100
 
                 fut_list = [s for s in COIN_LIST if s in futures_set]
                 tasks_1h = [get_cached(session, "klines_1h", s, FAPI_URL, "/fapi/v1/klines",
