@@ -42,11 +42,64 @@ BATCH_SIZE = 25
 MAX_CONSECUTIVE_ERRORS = 15
 SEMAPHORE = asyncio.Semaphore(20)
 
-STABLECOIN_BLACKLIST = {"USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDTUSDT"}
+STABLECOIN_BLACKLIST = {"USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDTUSDT", "FDUSDUSDT"}
 MAJOR_COINS_BLACKLIST = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
 
-TR_LIST_FILE = "tr_list.json"
+# Sabit Binance TR coin listesi (kullanıcı tarafından sağlanmıştır)
+TR_COIN_LIST = sorted([
+    "PORTAL", "NFP", "HEI", "ALLO", "PSG", "WLD",
+    "XLM", "VIC", "FET", "GENIUS", "NOM", "ID",
+    "HIVE", "IO", "EDEN", "MBOX", "INIT", "MEME",
+    "TRX", "1MBABYDOGE", "ASTER", "FORM", "INJ",
+    "AVNT", "SAGA", "GUN", "HEMI", "1000CAT", "PEPE",
+    "GIGGLE", "OPG", "AI", "LUNC", "MEGA", "ONDO",
+    "STRAX", "SUI", "D", "LAZIO", "ENA", "EIGEN",
+    "THE", "HBAR", "RENDER", "BEL", "PIXEL", "TIA",
+    "AVAX", "NEAR", "CAKE", "ALGO", "LUMIA", "MOVE",
+    "CHZ", "MUBARAK", "USUAL", "HIGH", "NIL", "NIGHT",
+    "CHIP", "ARKM", "TLM", "DOGE", "TAO", "DYM",
+    "JTO", "ALT", "RESOLV", "PENDLE", "SHIB", "ETHFI",
+    "ORDI", "SANTOS", "KAT", "FLOKI", "PHA", "BIO",
+    "BONK", "PENGU", "FIDA", "SCR", "TON", "TOWNS",
+    "ADA", "DASH", "TRUMP", "NEIRO", "1000SATS", "ALPINE",
+    "EUL", "STO", "DYDX", "ZK", "AXS", "BB",
+    "NEWT", "EDU", "GRT", "DODO", "LA", "PORTO",
+    "CFG", "APE", "ACH", "SEI", "USTC", "BMT",
+    "HYPER", "TST", "LISTA", "ARB", "ICP", "HOME",
+    "IOTA", "AXL", "VANRY", "LUNA", "SHELL", "ROBO",
+    "PARTI", "SXT", "AR", "SAHARA", "XAI", "TNSR",
+    "RARE", "LAYER", "YB", "VIRTUAL", "PLUME", "DOGS",
+    "AMP", "VET", "LINK", "W", "MITO", "CYBER",
+    "OG", "REZ", "MANTRA", "PNUT", "COS", "BAR",
+    "C", "SOLV", "ALICE", "RAD", "BERA", "FOGO",
+    "HAEDAL", "PUMP", "ME", "ATOM", "LDO", "JUV",
+    "FIL", "XVG", "STRK", "NXPC", "GPS", "XPL",
+    "PYTH", "AAVE", "FF", "BANK", "HMSTR", "GALA",
+    "KITE", "VANA", "LTC", "AEVO", "MMT", "MAGIC",
+    "ENJ", "CITY", "NOT", "ACT", "RONIN", "ACE",
+    "TURBO", "ZRO", "KERNEL", "SIGN", "MIRA", "ZBT",
+    "AUDIO", "DOT", "ROSE", "SAPIEN", "GMT", "SLP",
+    "PROVE", "MAV", "AIXBT", "MORPHO", "OP", "OPN",
+    "OPEN", "BOME", "HOT", "SUPER", "WLFI", "LINEA",
+    "UNI", "JASMY", "SNX", "ASR", "KAITO", "ENS",
+    "MINA", "2Z", "BLUR", "APT", "ONT", "S",
+    "API3", "G", "BABY", "HUMA", "MOVR", "METIS",
+    "BARD", "ACM", "LPT", "ARPA", "ARK", "BANANA",
+    "ORCA", "COMP", "SPELL", "ENSO", "ETC", "DOLO",
+    "WAL", "WIF", "COTI", "TRB", "POL", "CFX",
+    "BREV", "MANTA", "NMR", "POLYX", "F", "NEO",
+    "BTTC", "PEOPLE", "ERA", "SYRUP", "AT", "MET",
+    "STORJ", "BCH", "JUP", "SENT", "UMA", "ONE",
+    "ZKC", "RED", "STX", "SPK", "ESP", "ATM",
+    "SUSHI", "CETUS", "MANA", "XEC", "HOLO", "TREE",
+    "RVN", "CRV", "TWT", "RAY", "TURTLE", "SAND",
+    "CKB", "SKL", "EGLD", "0G", "OGN", "SOMI",
+    "WCT", "ANIME", "ANKR", "KSM", "THETA", "RSR",
+    "SUN", "GAS", "ZIL", "CATI", "ZKP", "QTUM",
+    "BEAMX", "COW", "CELO", "SOPH", "AUCTION", "SKY",
+    "U", "MASK", "ACX", "A", "PHB"
+])
 
 cache = {"funding": {}, "oi": {}, "ls_5m": {}, "klines_1m": {}, "klines_5m": {}, "klines_1h": {}}
 last_signals = {}
@@ -197,35 +250,16 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:]) if len(tr) >= period else None
 
 # =========================================================
-# COIN LİSTESİ (GLOBAL SPOT API ÜZERİNDEN TR COINLERİ)
+# COIN LİSTESİ (SADECE SABİT TR LİSTESİ)
 # =========================================================
-async def get_tr_spot_symbols_from_global(session):
-    """Global exchangeInfo'dan aktif USDT spot çiftlerini al, TR listesi olarak kullan."""
-    url = f"{SPOT_GLOBAL_URL}/api/v3/exchangeInfo"
-    resp = await fetch(session, url)
-    if resp and "symbols" in resp:
-        symbols = []
-        for s in resp["symbols"]:
-            if (s.get("quoteAsset") == "USDT" and
-                s.get("status") == "TRADING" and
-                s.get("isSpotTradingAllowed") and
-                s["symbol"] not in STABLECOIN_BLACKLIST and
-                s["symbol"] not in MAJOR_COINS_BLACKLIST and
-                s["symbol"] not in COMMODITY_BLACKLIST):
-                symbols.append(s["symbol"])
-        if len(symbols) > 50:
-            with open(TR_LIST_FILE, "w") as f:
-                json.dump(symbols, f)
-            print(f"✅ Global Spot API: {len(symbols)} coin listelendi.")
-            return symbols
-
-    if os.path.exists(TR_LIST_FILE):
-        with open(TR_LIST_FILE, "r") as f:
-            symbols = json.load(f)
-            print(f"📂 Yedek listeden {len(symbols)} coin yüklendi.")
-            return symbols
-    print("❌ Coin listesi alınamadı!")
-    return []
+def get_tr_coin_list():
+    """Sabit Binance TR coin listesini USDT formatına çevir, filtrele."""
+    symbols = []
+    for c in TR_COIN_LIST:
+        sym = f"{c}USDT"
+        if sym not in STABLECOIN_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST and sym not in COMMODITY_BLACKLIST:
+            symbols.append(sym)
+    return symbols
 
 async def get_futures_symbols(session):
     info = await fetch_api(session, FAPI_URL, "/fapi/v1/exchangeInfo")
@@ -432,12 +466,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU (Global API / TR Spot)")
+    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU (Sabit TR Listesi)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
 
-        COIN_LIST = await get_tr_spot_symbols_from_global(session)
+        COIN_LIST = get_tr_coin_list()  # sabit listeden geliyor
         futures_set = await get_futures_symbols(session)
         await send_telegram(session, f"🎯 Patlama Öncesi Bot ({len(COIN_LIST)} TR coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
