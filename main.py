@@ -112,11 +112,12 @@ daily_tracker = {}
 daily_report_lock = asyncio.Lock()
 
 # =========================================================
-# YENİ: LONG FUTURES ALARM SİSTEMİ DEĞİŞKENLERİ
+# LONG LIQUIDATION MONITOR DEĞİŞKENLERİ
 # =========================================================
-futures_alarm_cooldown = {}          # coin -> son alarm zamanı
-FUTURES_ALARM_COOLDOWN = 3600        # 1 saat aynı coin tekrar alarm vermesin
-FUTURES_DROP_THRESHOLD = -5.0        # %5 düşüş eşiği
+futures_alarm_cooldown = {}
+FUTURES_ALARM_COOLDOWN = 3600
+LS_DROP_5M_THRESHOLD = -3.0    # 5dk'da %3 düşüş
+LS_DROP_1H_THRESHOLD = -8.0    # 1 saatte %8 düşüş
 
 # =========================================================
 # TELEGRAM
@@ -217,24 +218,16 @@ async def midnight_reporter(session):
             daily_tracker.clear()
 
 # =========================================================
-# YENİ: LONG FUTURES DÜŞÜŞ ALARM MODÜLÜ
+# LONG LIQUIDATION MONITOR (LONG/SHORT ORANINA GÖRE)
 # =========================================================
 async def futures_crash_monitor(session):
-    """
-    Her 5 dakikada bir Binance TR listesindeki futures coin'lerin
-    son 1 saatte %5'ten fazla düşüp düşmediğini kontrol eder ve alarm atar.
-    """
     global bot_running
-
-    # Binance TR coinlerini USDT formatına çevir
     tr_symbols = get_tr_coin_list()
-
-    # Sadece futures'ta işlem görenleri bul
     futures_set = await get_futures_symbols(session)
     monitor_list = [s for s in tr_symbols if s in futures_set]
 
-    print(f"🛡️ LONG FUTURES ALARM AKTİF ({len(monitor_list)} futures coin izleniyor)")
-    await send_telegram(session, f"🛡️ LONG FUTURES ALARM AKTİF ({len(monitor_list)} coin)")
+    print(f"🛡️ LONG LIQUIDATION MONITOR ({len(monitor_list)} futures)")
+    await send_telegram(session, f"🛡️ LONG LIQUIDATION MONITOR ({len(monitor_list)} coin)")
 
     while True:
         if not bot_running:
@@ -243,58 +236,53 @@ async def futures_crash_monitor(session):
 
         try:
             now = time.time()
-
-            # Her coin için 1 saatlik kline çek (batch hâlinde)
             for i in range(0, len(monitor_list), BATCH_SIZE):
                 batch = monitor_list[i:i+BATCH_SIZE]
-
                 tasks = []
                 for sym in batch:
-                    tasks.append(fetch_api(session, FAPI_URL, "/fapi/v1/klines",
-                                           {"symbol": sym, "interval": "1h", "limit": 2}))
-
+                    tasks.append(fetch_api(session, FAPI_URL,
+                                           "/futures/data/globalLongShortAccountRatio",
+                                           {"symbol": sym, "period": "5m", "limit": 12}))
                 results = await asyncio.gather(*tasks)
 
-                for sym, klines in zip(batch, results):
-                    if not klines or len(klines) < 2:
+                for sym, data in zip(batch, results):
+                    if not data or len(data) < 2:
+                        continue
+                    ratios = [float(d["longShortRatio"]) for d in data if "longShortRatio" in d]
+                    if len(ratios) < 12:
                         continue
 
-                    # Son 1 saatlik mum
-                    prev_close = float(klines[0][4])   # 1 saat önceki kapanış
-                    curr_close = float(klines[1][4])   # şu anki kapanış (son mum)
+                    change_5m = ((ratios[-1] - ratios[-2]) / ratios[-2]) * 100 if ratios[-2] != 0 else 0
+                    change_1h = ((ratios[-1] - ratios[0]) / ratios[0]) * 100 if ratios[0] != 0 else 0
 
-                    if prev_close <= 0:
-                        continue
+                    alarm = False
+                    reason = ""
+                    if change_5m < LS_DROP_5M_THRESHOLD:
+                        alarm = True
+                        reason = f"5dk Long/Short düşüşü %{change_5m:.1f}"
+                    elif change_1h < LS_DROP_1H_THRESHOLD:
+                        alarm = True
+                        reason = f"1 saat Long/Short düşüşü %{change_1h:.1f}"
 
-                    change_1h = ((curr_close - prev_close) / prev_close) * 100
-
-                    # %5'ten fazla düşmüş mü?
-                    if change_1h <= FUTURES_DROP_THRESHOLD:
-                        # Cooldown kontrolü
+                    if alarm:
                         last_alarm = futures_alarm_cooldown.get(sym, 0)
                         if now - last_alarm < FUTURES_ALARM_COOLDOWN:
                             continue
-
-                        # Alarm mesajı
-                        msg = (
-                            f"🔻 <b>LONG FUTURES ALARM</b>\n"
-                            f"<b>{sym}</b>\n"
-                            f"1 saatlik düşüş: <b>%{change_1h:.2f}</b>\n"
-                            f"Güncel fiyat: {curr_close:.6f}\n"
-                            f"1s önce: {prev_close:.6f}"
-                        )
+                        msg = (f"🔻 <b>LONG LIQUIDATION ALARM</b>\n"
+                               f"<b>{sym}</b>\n"
+                               f"{reason}\n"
+                               f"Long/Short Oranı: {ratios[-1]:.4f}\n"
+                               f"5dk önce: {ratios[-2]:.4f} | 1s önce: {ratios[0]:.4f}")
                         await send_telegram(session, msg)
                         futures_alarm_cooldown[sym] = now
-                        print(f"🔻 FUTURES ALARM: {sym} %{change_1h:.2f}")
 
-                await asyncio.sleep(0.2)  # batch'ler arası minik nefes
+                await asyncio.sleep(0.2)
 
         except Exception as e:
-            print(f"Futures alarm hatası: {e}")
+            print(f"Liquidation monitor error: {e}")
             traceback.print_exc()
 
-        # 5 dakikada bir tara
-        await asyncio.sleep(300)
+        await asyncio.sleep(300)  # 5 dakika
 
 # =========================================================
 # API (MEVCUT KORUNDU)
@@ -481,7 +469,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     if buy_sell_ratio < 1.0 or change_pct < -0.3:
         adjusted_rel_vol = 0.0
 
-    if adjusted_rel_vol < 1.5:   # eski eşik 1.5
+    if adjusted_rel_vol < 1.5:
         return None
 
     closes = [float(k[4]) for k in closed[-40:]]
@@ -581,27 +569,23 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
                 funding_rate = float(fr_data[0]["fundingRate"])
         except: pass
 
-    # ========== SKORLAMA (DAĞITIM CEZASI EKLENDİ) ==========
+    # ========== SKORLAMA ==========
     score = 0
     reasons = []
 
-    # RelVol (düzeltilmiş)
     if adjusted_rel_vol > 3.0: score += 5; reasons.append("🔥🔥 RelVol (alıcı oranının yüksekliği)")
     elif adjusted_rel_vol > 2.0: score += 3; reasons.append("🔥 RelVol (alıcı oranının yüksekliği)")
     elif adjusted_rel_vol > 1.5: score += 1; reasons.append("RelVol (alıcı oranının yüksekliği)")
 
     if strong_buy_pressure: score += 2; reasons.append("📊 Net Alıcı Baskısı")
 
-    # RS
     if rs > 1.5: score += 4; reasons.append(f"🚀 RS {rs:.2f} (BTC'den bağımsız güç)")
     elif rs > 0.5: score += 2; reasons.append(f"✅ RS {rs:.2f} (BTC'den bağımsız güç)")
     elif rs > -1.0: score += 1; reasons.append(f"➖ RS {rs:.2f} (nötr)")
 
-    # CVD
     if cvd_divergence: score += 4; reasons.append("🔍 CVD Divergence (gizli alım)")
     elif cvd_30 > 0: score += 2; reasons.append("📈 CVD Trend")
 
-    # BB
     if is_squeezing: score += 6; reasons.append("🎯 BB Sıkışma")
     if volatility_squeeze: score += 5; reasons.append("📉 Volatilite Daralması")
     if volume_dryup: score += 4; reasons.append("🤫 Hacim Kuruması (sessiz alım)")
@@ -609,46 +593,37 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     elif near_breakout: score += 3; reasons.append("📌 Tepeye Yakın")
     if vol_acceleration: score += 3; reasons.append("🚀 Hacim İvmesi")
 
-    # LS
     if ls_5m_change < -2: score += 3; reasons.append("📉 LS squeeze")
 
-    # OI
     if oi_flat_price: score += 4; reasons.append("🏦 OI + Fiyat Yatay (akıllı para)")
     elif oi_change_pct > 1.0: score += 3; reasons.append(f"📊 OI Artışı %{oi_change_pct:.1f}")
     elif oi_change_pct < -1.0: score -= 2
 
-    # Funding Rate
     if funding_rate < -0.001: score += 3; reasons.append(f"💸 Negatif Funding %{funding_rate*100:.2f}")
     elif funding_rate > 0.001: score -= 3
 
-    # EMA
     ema9 = calculate_ema(closes, 9)
     ema21 = calculate_ema(closes, 21)
     if ema9 and ema21 and (abs(ema9 - ema21) / close_p * 100) < 0.8:
         score += 5; reasons.append("🌀 EMA Sıkışması")
 
-    # 1h Trend
     if symbol in klines_1h and klines_1h[symbol] is not None:
         ema20_1h = calculate_ema([float(k[4]) for k in klines_1h[symbol]], 20)
         if ema20_1h and close_p > ema20_1h: score += 2; reasons.append("1h↑")
 
-    # RSI
     rsi = calculate_rsi(closes, 14)
     if rsi:
         if rsi < 30: score += 5; reasons.append(f"RSI{rsi:.0f} aşırı satım dip")
         elif rsi < 50: score += 3; reasons.append(f"RSI{rsi:.0f} dip")
 
-    # Aynı coin cezası
     if any(c == symbol for c, _ in recent_signal_coins): score -= 3
 
-    # Dağıtım/düşüş cezası (yeni)
     if change_5 < -0.5:
         score -= 6
         reasons.append("⚠️ Düşüş trendi cezası")
 
     if score < MIN_SCORE: return None
 
-    # ATR bazlı TP/SL
     atr_val = calculate_atr(highs, lows, closes, 10) or close_p * 0.02
     raw_tp_pct = (atr_val * TP_MULT / close_p) * 100
     tp_pct = min(raw_tp_pct, MAX_TP_PCT)
@@ -668,18 +643,16 @@ async def scan_coin(session, symbol, is_futures, kl_5m, btc_change, klines_1h, d
     }
 
 # =========================================================
-# MAIN (FUTURES ALARM GÖREVİ EKLENDİ)
+# MAIN (LONG LIQUIDATION MONITOR EKLENDİ)
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU + LONG FUTURES ALARM")
+    print("🚀 PATLAMA ÖNCESİ SİNYAL BOTU + LONG LIQUIDATION MONITOR")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
         asyncio.create_task(midnight_reporter(session))
-
-        # YENİ: Futures düşüş alarmını başlat
-        asyncio.create_task(futures_crash_monitor(session))
+        asyncio.create_task(futures_crash_monitor(session))  # YENİ
 
         COIN_LIST = get_tr_coin_list()
         futures_set = await get_futures_symbols(session)
