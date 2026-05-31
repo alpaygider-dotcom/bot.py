@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (TR + GLOBAL FALLBACK)
+# AYARLAR (MIN_SCORE = 14)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -19,14 +19,14 @@ if not BOT_TOKEN or not CHAT_ID:
 
 FAPI_URL = "https://fapi.binance.com"
 SPOT_TR_URL = "https://api.trbinance.com"
-SPOT_GLOBAL_URL = "https://api.binance.com"  # YEDEK
+SPOT_GLOBAL_URL = "https://api.binance.com"
 
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 2
 
-MIN_SCORE = 10
+MIN_SCORE = 14  # SADECE YÜKSEK PUANLILAR
 
 TP_MULT = 10
 SL_MULT = 5
@@ -199,8 +199,6 @@ def calculate_atr(highs, lows, closes, period=10):
 # SEMBOL LİSTESİ (TR + GLOBAL FALLBACK)
 # =========================================================
 async def get_spot_symbols(session):
-    """Önce Binance TR'yi, başarısız olursa Global Binance'i dener."""
-    # 1. Binance TR
     info = await fetch_api(session, SPOT_TR_URL, "/api/v3/exchangeInfo")
     if info:
         symbols = set()
@@ -212,12 +210,9 @@ async def get_spot_symbols(session):
         if symbols:
             print(f"✅ Binance TR: {len(symbols)} coin")
             return symbols
-
-    # 2. Global Binance (yedek)
     print("⚠️ TR API başarısız, Global Binance kullanılıyor...")
     info = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/exchangeInfo")
-    if not info:
-        return set()
+    if not info: return set()
     symbols = set()
     for s in info.get("symbols", []):
         if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
@@ -290,7 +285,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     min_quote = max(30_000, coin_median_vol * 0.30)
     if quote_vol < min_quote or abs(change_pct) > 8.0: return None
 
-    # RelVol
     taker_hist = [float(k[9]) for k in kl_5m[-7:-2]]
     avg_taker = mean(taker_hist) if taker_hist else tbuy
     rel_vol = round(tbuy / avg_taker, 2) if avg_taker > 0 else 0
@@ -298,7 +292,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if rel_vol < 1.0:
         return None
 
-    # RS
     closes = [float(k[4]) for k in closed[-24:]]
     if len(closes) >= 12:
         coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
@@ -309,10 +302,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if rs <= 0.2:
         return None
 
-    # CVD
     cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
 
-    # BB Squeeze
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
     bb_width = (bb_upper - bb_lower) / bb_mid if bb_mid > 0 else 1
 
@@ -323,7 +314,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
             bb_widths.append((bb[1] - bb[2]) / bb[0] if bb[0] > 0 else 1)
     is_squeezing = len(bb_widths) >= 10 and min(bb_widths[-10:]) < median(bb_widths) * 0.6
 
-    # LS
     ls_5m_change = 0.0
     if is_futures:
         try:
@@ -336,7 +326,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
                 ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
         except: pass
 
-    # ========== SKORLAMA ==========
     score = 0
     reasons = []
 
@@ -379,7 +368,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     if score < MIN_SCORE:
         return None
 
-    # ATR hesaplama (garantili)
     highs_30 = [float(k[2]) for k in closed[-30:]]
     lows_30 = [float(k[3]) for k in closed[-30:]]
     atr_val = calculate_atr(highs_30, lows_30, closes[-len(highs_30):])
@@ -405,22 +393,22 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     }
 
 # =========================================================
-# MAIN (TR + GLOBAL FALLBACK)
+# MAIN
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print(f"🚀 TR + GLOBAL FALLBACK")
+    print(f"🚀 YÜKSEK PUANLI SİNYAL BOTU")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
 
         COIN_LIST = sorted(await get_spot_symbols(session))
         if not COIN_LIST:
-            await send_telegram(session, "❌ Sembol listesi alınamadı, bot durduruldu!")
+            await send_telegram(session, "❌ Sembol listesi alınamadı!")
             return
 
         futures_set = await get_futures_symbols(session)
-        await send_telegram(session, f"🎯 Bot başlatıldı ({len(COIN_LIST)} coin) | /report")
+        await send_telegram(session, f"🎯 Yüksek Puanlı Bot ({len(COIN_LIST)} coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
