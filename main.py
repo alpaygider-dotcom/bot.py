@@ -26,7 +26,7 @@ SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 120
 MAX_SIGNALS_PER_ROUND = 2
-MIN_SCORE = 27  # 30'dan 27'ye düşürüldü
+MIN_SCORE = 27
 
 TP_MULT = 10
 SL_MULT = 5
@@ -113,14 +113,23 @@ daily_tracker = {}
 daily_report_lock = asyncio.Lock()
 
 # =========================================================
-# LONG LIQUIDATION MONITOR (EŞİK DÜŞÜRÜLDÜ)
+# LONG LIQUIDATION MONITOR (İKİ KADEMELİ)
 # =========================================================
 futures_alarm_cooldown = {}
 FUTURES_ALARM_COOLDOWN = 3600
+FUTURES_EARLY_COOLDOWN = 1800
+
+# Likidasyon eşikleri
 LS_DROP_5M_THRESHOLD = -5.0
 OI_DROP_5M_THRESHOLD = -3.0
 PRICE_DROP_5M_THRESHOLD = -1.0
-LIQUIDATION_SCORE_THRESHOLD = 6  # 7'den 6'ya düşürüldü
+LIQUIDATION_SCORE_THRESHOLD = 6
+
+# Erken uyarı eşikleri
+OI_RISE_EARLY_THRESHOLD = 2.0
+PRICE_DROP_EARLY_THRESHOLD = -0.3
+LS_DROP_EARLY_THRESHOLD = -1.5
+EARLY_WARNING_SCORE_THRESHOLD = 5
 
 # =========================================================
 # TELEGRAM
@@ -221,7 +230,7 @@ async def midnight_reporter(session):
             daily_tracker.clear()
 
 # =========================================================
-# LONG LIQUIDATION MONITOR (EŞİK: 6)
+# LONG LIQUIDATION MONITOR (İKİ KADEMELİ: ERKEN UYARI + LİKİDASYON)
 # =========================================================
 async def futures_crash_monitor(session):
     global bot_running
@@ -229,8 +238,8 @@ async def futures_crash_monitor(session):
     futures_set = await get_futures_symbols(session)
     monitor_list = [s for s in tr_symbols if s in futures_set]
 
-    print(f"🛡️ LONG LIQUIDATION MONITOR ({len(monitor_list)} futures)")
-    await send_telegram(session, f"🛡️ LONG LIQUIDATION MONITOR ({len(monitor_list)} coin)")
+    print(f"🛡️ FUTURES MONITOR ({len(monitor_list)} coins) [Erken Uyarı + Likidasyon]")
+    await send_telegram(session, f"🛡️ FUTURES MONITOR ({len(monitor_list)} coin)")
 
     while True:
         if not bot_running:
@@ -261,10 +270,12 @@ async def futures_crash_monitor(session):
                 price_results = await asyncio.gather(*price_tasks)
 
                 for sym, ls_data, oi_data, klines in zip(batch, ls_results, oi_results, price_results):
-                    score = 0
+                    liq_score = 0
+                    early_score = 0
                     details = []
                     current_price = "N/A"
 
+                    # L/S değişimi
                     ls_change = 0.0
                     if ls_data and len(ls_data) >= 2:
                         try:
@@ -275,10 +286,7 @@ async def futures_crash_monitor(session):
                         except (KeyError, TypeError, ZeroDivisionError):
                             pass
 
-                    if ls_change < LS_DROP_5M_THRESHOLD:
-                        score += 3
-                        details.append(f"L/S: %{ls_change:.1f}")
-
+                    # OI değişimi
                     oi_change = 0.0
                     if oi_data and len(oi_data) >= 2:
                         try:
@@ -289,10 +297,7 @@ async def futures_crash_monitor(session):
                         except (KeyError, TypeError, ZeroDivisionError):
                             pass
 
-                    if oi_change < OI_DROP_5M_THRESHOLD:
-                        score += 4
-                        details.append(f"OI: %{oi_change:.1f}")
-
+                    # Fiyat değişimi
                     price_change = 0.0
                     if klines and len(klines) >= 2:
                         try:
@@ -304,29 +309,54 @@ async def futures_crash_monitor(session):
                         except (IndexError, TypeError, ValueError):
                             pass
 
+                    # ========== ERKEN UYARI KONTROLÜ ==========
+                    if oi_change > OI_RISE_EARLY_THRESHOLD:
+                        early_score += 3
+                    if price_change < PRICE_DROP_EARLY_THRESHOLD:
+                        early_score += 2
+                    if ls_change < LS_DROP_EARLY_THRESHOLD:
+                        early_score += 2
+
+                    if early_score >= EARLY_WARNING_SCORE_THRESHOLD:
+                        last_early = futures_alarm_cooldown.get(f"early_{sym}", 0)
+                        if now - last_early >= FUTURES_EARLY_COOLDOWN:
+                            early_msg = (f"⚠️ <b>ERKEN UYARI - Long Sıkışması</b>\n"
+                                        f"<b>{sym}</b>\n"
+                                        f"OI: %{oi_change:+.1f} | Fiyat: %{price_change:+.1f} | L/S: %{ls_change:+.1f}\n"
+                                        f"Fiyat: {current_price}\n"
+                                        f"<i>Short'lar toplanıyor, likidasyon gelebilir</i>")
+                            await send_telegram(session, early_msg)
+                            futures_alarm_cooldown[f"early_{sym}"] = now
+
+                    # ========== LİKİDASYON KONTROLÜ ==========
                     if price_change >= PRICE_DROP_5M_THRESHOLD:
                         continue
 
+                    if ls_change < LS_DROP_5M_THRESHOLD:
+                        liq_score += 3
+                        details.append(f"L/S: %{ls_change:.1f}")
+                    if oi_change < OI_DROP_5M_THRESHOLD:
+                        liq_score += 4
+                        details.append(f"OI: %{oi_change:.1f}")
                     if price_change < PRICE_DROP_5M_THRESHOLD:
-                        score += 3
+                        liq_score += 3
                         details.append(f"Fiyat: %{price_change:.1f}")
 
-                    if score >= LIQUIDATION_SCORE_THRESHOLD:
-                        last_alarm = futures_alarm_cooldown.get(sym, 0)
-                        if now - last_alarm < FUTURES_ALARM_COOLDOWN:
-                            continue
-                        msg = (f"🔻 <b>LONG LIQUIDATION ALARM</b>\n"
-                               f"<b>{sym}</b>\n"
-                               f"Skor: {score}/10\n"
-                               f"{', '.join(details)}\n"
-                               f"Fiyat: {current_price}")
-                        await send_telegram(session, msg)
-                        futures_alarm_cooldown[sym] = now
+                    if liq_score >= LIQUIDATION_SCORE_THRESHOLD:
+                        last_liq = futures_alarm_cooldown.get(sym, 0)
+                        if now - last_liq >= FUTURES_ALARM_COOLDOWN:
+                            liq_msg = (f"🔻 <b>LONG LIQUIDATION ALARM</b>\n"
+                                      f"<b>{sym}</b>\n"
+                                      f"Skor: {liq_score}/10\n"
+                                      f"{', '.join(details)}\n"
+                                      f"Fiyat: {current_price}")
+                            await send_telegram(session, liq_msg)
+                            futures_alarm_cooldown[sym] = now
 
                 await asyncio.sleep(0.2)
 
         except Exception as e:
-            print(f"Liquidation monitor error: {e}")
+            print(f"Futures monitor error: {e}")
             traceback.print_exc()
 
         await asyncio.sleep(300)
@@ -795,7 +825,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU + LIQUIDATION MONITOR (MIN_SCORE=27, LIQ=6)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU + FUTURES MONITOR (Erken Uyarı + Likidasyon)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
@@ -804,7 +834,7 @@ async def main():
 
         COIN_LIST = get_tr_coin_list()
         futures_set = await get_futures_symbols(session)
-        await send_telegram(session, f"🎯 Dip Dönüşü + Likidasyon Botu ({len(COIN_LIST)} TR coin) | /report")
+        await send_telegram(session, f"🎯 Dip Dönüşü + Futures Monitor ({len(COIN_LIST)} TR coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
