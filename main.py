@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (BİNANCE TR OTOMATİK LİSTE)
+# AYARLAR (TR + GLOBAL FALLBACK)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -19,6 +19,7 @@ if not BOT_TOKEN or not CHAT_ID:
 
 FAPI_URL = "https://fapi.binance.com"
 SPOT_TR_URL = "https://api.trbinance.com"
+SPOT_GLOBAL_URL = "https://api.binance.com"  # YEDEK
 
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
@@ -195,13 +196,27 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:]) if len(tr) >= period else None
 
 # =========================================================
-# BİNANCE TR LİSTESİ (OTOMATİK)
+# SEMBOL LİSTESİ (TR + GLOBAL FALLBACK)
 # =========================================================
-async def get_tr_spot_symbols(session):
-    """Binance TR API'sinden güncel USDT spot çiftlerini çeker."""
+async def get_spot_symbols(session):
+    """Önce Binance TR'yi, başarısız olursa Global Binance'i dener."""
+    # 1. Binance TR
     info = await fetch_api(session, SPOT_TR_URL, "/api/v3/exchangeInfo")
+    if info:
+        symbols = set()
+        for s in info.get("symbols", []):
+            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+                sym = s["symbol"]
+                if sym not in STABLECOIN_BLACKLIST and sym not in COMMODITY_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST:
+                    symbols.add(sym)
+        if symbols:
+            print(f"✅ Binance TR: {len(symbols)} coin")
+            return symbols
+
+    # 2. Global Binance (yedek)
+    print("⚠️ TR API başarısız, Global Binance kullanılıyor...")
+    info = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/exchangeInfo")
     if not info:
-        print("❌ Binance TR API'sine erişilemedi!")
         return set()
     symbols = set()
     for s in info.get("symbols", []):
@@ -209,6 +224,7 @@ async def get_tr_spot_symbols(session):
             sym = s["symbol"]
             if sym not in STABLECOIN_BLACKLIST and sym not in COMMODITY_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST:
                 symbols.add(sym)
+    print(f"✅ Global Binance: {len(symbols)} coin")
     return symbols
 
 async def get_futures_symbols(session):
@@ -389,24 +405,23 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
     }
 
 # =========================================================
-# MAIN
+# MAIN (TR + GLOBAL FALLBACK)
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print(f"🚀 BİNANCE TR OTOMATİK LİSTE")
+    print(f"🚀 TR + GLOBAL FALLBACK")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
 
-        # Binance TR listesini canlı çek
-        COIN_LIST = sorted(await get_tr_spot_symbols(session))
+        COIN_LIST = sorted(await get_spot_symbols(session))
         if not COIN_LIST:
-            await send_telegram(session, "❌ Binance TR liste alınamadı!")
+            await send_telegram(session, "❌ Sembol listesi alınamadı, bot durduruldu!")
             return
 
         futures_set = await get_futures_symbols(session)
-        await send_telegram(session, f"🎯 Bot başlatıldı ({len(COIN_LIST)} TR coin) | /report")
-        print(f"✅ {len(COIN_LIST)} TR coin taranıyor ({len(futures_set)} futures)")
+        await send_telegram(session, f"🎯 Bot başlatıldı ({len(COIN_LIST)} coin) | /report")
+        print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
 
@@ -447,7 +462,7 @@ async def main():
 
                 tasks_5m = []
                 for s in COIN_LIST:
-                    base = FAPI_URL if s in futures_set else SPOT_TR_URL
+                    base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
                     ep = "/fapi/v1/klines" if s in futures_set else "/api/v3/klines"
                     tasks_5m.append(get_cached(session, "klines_5m", s, base, ep,
                                                {"symbol": s, "interval": "5m", "limit": 50}, CACHE_5M))
