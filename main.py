@@ -26,7 +26,7 @@ SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 120
 MAX_SIGNALS_PER_ROUND = 2
-MIN_SCORE = 30  # 22'den 30'a çıkarıldı
+MIN_SCORE = 27  # 30'dan 27'ye düşürüldü
 
 TP_MULT = 10
 SL_MULT = 5
@@ -113,14 +113,14 @@ daily_tracker = {}
 daily_report_lock = asyncio.Lock()
 
 # =========================================================
-# LONG LIQUIDATION MONITOR
+# LONG LIQUIDATION MONITOR (EŞİK DÜŞÜRÜLDÜ)
 # =========================================================
 futures_alarm_cooldown = {}
 FUTURES_ALARM_COOLDOWN = 3600
 LS_DROP_5M_THRESHOLD = -5.0
 OI_DROP_5M_THRESHOLD = -3.0
 PRICE_DROP_5M_THRESHOLD = -1.0
-LIQUIDATION_SCORE_THRESHOLD = 7
+LIQUIDATION_SCORE_THRESHOLD = 6  # 7'den 6'ya düşürüldü
 
 # =========================================================
 # TELEGRAM
@@ -221,7 +221,7 @@ async def midnight_reporter(session):
             daily_tracker.clear()
 
 # =========================================================
-# LONG LIQUIDATION MONITOR
+# LONG LIQUIDATION MONITOR (EŞİK: 6)
 # =========================================================
 async def futures_crash_monitor(session):
     global bot_running
@@ -447,7 +447,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (DİP DÖNÜŞÜ - MIN_SCORE=30)
+# SCAN COIN (DİP DÖNÜŞÜ - DELTA DIVERGENCE ZORUNLU)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -795,7 +795,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU + LIQUIDATION MONITOR (MIN_SCORE=30)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU + LIQUIDATION MONITOR (MIN_SCORE=27, LIQ=6)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
@@ -804,7 +804,7 @@ async def main():
 
         COIN_LIST = get_tr_coin_list()
         futures_set = await get_futures_symbols(session)
-        await send_telegram(session, f"🎯 Dip Dönüşü Sinyal Botu ({len(COIN_LIST)} TR coin) | /report")
+        await send_telegram(session, f"🎯 Dip Dönüşü + Likidasyon Botu ({len(COIN_LIST)} TR coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
@@ -835,7 +835,6 @@ async def main():
                 r1 = await asyncio.gather(*tasks_1h)
                 k1 = {s: r for s, r in zip(fut_list, r1) if r is not None}
 
-                # 15dk kline'lar
                 tasks_15m = {}
                 for s in COIN_LIST:
                     base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
