@@ -8,7 +8,7 @@ from collections import deque
 import traceback
 
 # =========================================================
-# AYARLAR (MIN_SCORE = 14)
+# AYARLAR (BINANCE TR RESMİ API İLE CANLI LİSTE)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -18,7 +18,7 @@ if not BOT_TOKEN or not CHAT_ID:
     exit(1)
 
 FAPI_URL = "https://fapi.binance.com"
-SPOT_TR_URL = "https://api.trbinance.com"
+SPOT_TR_URL = "https://api.binance.tr"
 SPOT_GLOBAL_URL = "https://api.binance.com"
 
 SCAN_INTERVAL = 20
@@ -26,7 +26,7 @@ COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 90
 MAX_SIGNALS_PER_ROUND = 2
 
-MIN_SCORE = 14  # SADECE YÜKSEK PUANLILAR
+MIN_SCORE = 14
 
 TP_MULT = 10
 SL_MULT = 5
@@ -43,7 +43,7 @@ BATCH_SIZE = 25
 MAX_CONSECUTIVE_ERRORS = 15
 SEMAPHORE = asyncio.Semaphore(20)
 
-STABLECOIN_BLACKLIST = {"USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT"}
+STABLECOIN_BLACKLIST = {"USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDTUSDT"}
 MAJOR_COINS_BLACKLIST = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
 COMMODITY_BLACKLIST = {"PAXGUSDT"}
 
@@ -196,31 +196,24 @@ def calculate_atr(highs, lows, closes, period=10):
     return mean(tr[-period:]) if len(tr) >= period else None
 
 # =========================================================
-# SEMBOL LİSTESİ (TR + GLOBAL FALLBACK)
+# BINANCE TR RESMİ LİSTE (CANLI)
 # =========================================================
-async def get_spot_symbols(session):
-    info = await fetch_api(session, SPOT_TR_URL, "/api/v3/exchangeInfo")
-    if info:
-        symbols = set()
-        for s in info.get("symbols", []):
-            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
-                sym = s["symbol"]
-                if sym not in STABLECOIN_BLACKLIST and sym not in COMMODITY_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST:
-                    symbols.add(sym)
-        if symbols:
-            print(f"✅ Binance TR: {len(symbols)} coin")
-            return symbols
-    print("⚠️ TR API başarısız, Global Binance kullanılıyor...")
-    info = await fetch_api(session, SPOT_GLOBAL_URL, "/api/v3/exchangeInfo")
-    if not info: return set()
-    symbols = set()
-    for s in info.get("symbols", []):
-        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
-            sym = s["symbol"]
-            if sym not in STABLECOIN_BLACKLIST and sym not in COMMODITY_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST:
-                symbols.add(sym)
-    print(f"✅ Global Binance: {len(symbols)} coin")
-    return symbols
+async def get_tr_spot_symbols(session):
+    """Binance TR resmi API'sinden güncel sembol listesini çeker."""
+    url = "https://api.binance.tr/open/v1/common/symbols"
+    resp = await fetch(session, url)
+    if resp and resp.get("code") == 200:
+        symbols = []
+        for s in resp.get("data", []):
+            sym = s.get("symbol", "")
+            # USDT çiftlerini al, USDT'yi sonuna ekle
+            if sym and sym not in STABLECOIN_BLACKLIST and sym not in COMMODITY_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST:
+                symbols.append(sym)
+        print(f"✅ Binance TR API: {len(symbols)} coin")
+        return symbols
+    else:
+        print("❌ Binance TR API başarısız!")
+        return []
 
 async def get_futures_symbols(session):
     info = await fetch_api(session, FAPI_URL, "/fapi/v1/exchangeInfo")
@@ -397,19 +390,20 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_1m, market_median,
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins
-    print(f"🚀 YÜKSEK PUANLI SİNYAL BOTU")
+    print(f"🚀 BINANCE TR RESMİ API İLE CANLI LİSTE")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
 
-        COIN_LIST = sorted(await get_spot_symbols(session))
+        # Binance TR resmi API'sinden canlı liste çek
+        COIN_LIST = await get_tr_spot_symbols(session)
         if not COIN_LIST:
-            await send_telegram(session, "❌ Sembol listesi alınamadı!")
+            await send_telegram(session, "❌ Binance TR sembol listesi alınamadı!")
             return
 
         futures_set = await get_futures_symbols(session)
-        await send_telegram(session, f"🎯 Yüksek Puanlı Bot ({len(COIN_LIST)} coin) | /report")
-        print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
+        await send_telegram(session, f"🎯 TR Resmi Liste ({len(COIN_LIST)} coin) | /report")
+        print(f"✅ {len(COIN_LIST)} TR coin taranıyor ({len(futures_set)} futures)")
 
         last_global = 0
 
