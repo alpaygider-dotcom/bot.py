@@ -26,8 +26,8 @@ SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 180
 MAX_SIGNALS_PER_ROUND = 2
-MIN_SCORE_SPOT = 30  # DENGELİ
-MIN_SCORE_FUTURE = 27  # DENGELİ
+MIN_SCORE_SPOT = 30
+MIN_SCORE_FUTURE = 27
 
 TP_MULT = 10
 SL_MULT = 5
@@ -594,35 +594,23 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                                     "/futures/data/topLongShortPositionRatio",
                                     {"symbol": symbol, "period": "5m", "limit": 4}, CACHE_LS_5M)
             if ls5m and len(ls5m) >= 4:
-                ls_5m_prev = float(ls5m[-4]["longShortRatio"])
                 ls_5m_curr = float(ls5m[-1]["longShortRatio"])
+                ls_5m_prev = float(ls5m[-4]["longShortRatio"])
                 if ls_5m_prev > 0:
                     ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
                     
-                    # Fiyat yükseliyor ve OI artıyorsa = Short Squeeze
-                    oi_change_pct_local = 0.0
-                    try:
-                        oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
-                                                   "/futures/data/openInterestHist",
-                                                   {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
-                        if oi_data and len(oi_data) >= 2:
-                            oi_prev = float(oi_data[-2]["sumOpenInterest"])
-                            oi_curr = float(oi_data[-1]["sumOpenInterest"])
-                            if oi_prev > 0:
-                                oi_change_pct_local = ((oi_curr - oi_prev) / oi_prev) * 100
-                    except: pass
-
-                    if price_change > 0.3 and oi_change_pct_local > 1.0:
-                        if ls_5m_change < -2.5:
-                            futures_score += 6
-                            futures_reasons.append(f"LS Short Squeeze %{ls_5m_change:.1f}")
-                        elif ls_5m_change < -1.0:
-                            futures_score += 3
-                            futures_reasons.append(f"LS Short azalıyor %{ls_5m_change:.1f}")
-                    elif price_change > 0.1:
-                        if ls_5m_change < -3.0:
-                            futures_score += 2
-                            futures_reasons.append(f"LS %{ls_5m_change:.1f} (Dikkat)")
+                    # Short Squeeze: LS seviyesi düşük (Short dominant) ve düşüyor
+                    if ls_5m_curr < 1.5 and ls_5m_change < -2.0:
+                        futures_score += 6
+                        futures_reasons.append(f"LS Short Squeeze (Seviye {ls_5m_curr:.2f})")
+                    # Long azalıyor uyarısı (Yüksek LS seviyesi)
+                    elif ls_5m_curr > 2.0 and ls_5m_change < -2.0:
+                        futures_score += 2
+                        futures_reasons.append(f"LS Long azalıyor (Seviye {ls_5m_curr:.2f})")
+                    # Orta seviye LS düşüşü
+                    elif ls_5m_change < -2.0:
+                        futures_score += 1
+                        futures_reasons.append(f"LS %{ls_5m_change:.1f} (Dikkat)")
         except: pass
 
         # 2. OI artışı (Daha dengeli puan)
@@ -637,10 +625,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                 if oi_prev > 0:
                     oi_change_pct = ((oi_curr - oi_prev) / oi_prev) * 100
                     if oi_change_pct > 3.0:
-                        futures_score += 2  # DÜŞÜRÜLDÜ (4 -> 2)
+                        futures_score += 2
                         futures_reasons.append(f"OI %{oi_change_pct:.1f} (Akıllı para)")
                     elif oi_change_pct > 1.5:
-                        futures_score += 1  # DÜŞÜRÜLDÜ (2 -> 1)
+                        futures_score += 1
                         futures_reasons.append(f"OI %{oi_change_pct:.1f} artıyor")
         except: pass
 
@@ -653,7 +641,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
             if fr_data and len(fr_data) > 0:
                 funding_rate = float(fr_data[0]["fundingRate"])
                 if funding_rate < -0.001:
-                    futures_score += 1  # DÜŞÜRÜLDÜ (3 -> 1)
+                    futures_score += 1
                     futures_reasons.append(f"Negatif Funding %{funding_rate*100:.2f}")
         except: pass
 
@@ -674,11 +662,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
             futures_reasons.append("📉 Delta Divergence")
 
     else:
-        # SPOT: Delta Divergence zorunlu değil, bonus
+        # SPOT: Delta Divergence bonus
         if delta_divergence:
-            futures_score += 5  # SPOT için bonus
+            futures_score += 5
             futures_reasons.append("🔥 Delta Divergence")
-        # Eğer delta divergence yoksa sinyali iptal etme, sadece puan verme
 
     # ========== GENEL SKORLAMA ==========
     score = 0
@@ -755,8 +742,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     if ema9 and ema21 and (abs(ema9 - ema21) / close_p * 100) < 1.0:
         score += 4; reasons.append("🌀 EMA Sıkışması")
 
-    # Aynı coin cezası (KALDIRILDI)
-
     # 15dk trend cezası
     if not trend_15m_up:
         score -= 1
@@ -791,7 +776,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (DENGELİ)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (DENGELİ - LS DÜZELTİLMİŞ)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
