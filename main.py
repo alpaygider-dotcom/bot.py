@@ -24,10 +24,10 @@ SPOT_GLOBAL_URL = "https://api.binance.com"
 
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
-GLOBAL_COOLDOWN = 180
-MAX_SIGNALS_PER_ROUND = 2
-MIN_SCORE_SPOT = 38
-MIN_SCORE_FUTURE = 32  # Futures daha düşük eşik (daha hızlı sinyal)
+GLOBAL_COOLDOWN = 120
+MAX_SIGNALS_PER_ROUND = 3
+MIN_SCORE_SPOT = 33
+MIN_SCORE_FUTURE = 28
 
 TP_MULT = 10
 SL_MULT = 5
@@ -538,7 +538,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote = max(50_000, coin_median_vol * 0.50)
+    min_quote = max(30_000, coin_median_vol * 0.50)  # Düşürüldü 50k -> 30k
     if quote_vol < min_quote: return None
 
     # --- RelVol ---
@@ -646,12 +646,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                 futures_score += 3
                 futures_reasons.append("📉 Delta Divergence (Dönüş işareti)")
     else:
-        # SPOT için Delta Divergence ZORUNLU
+        # SPOT için Delta Divergence ZORUNLU (HAFİFLETİLDİ)
         delta_divergence = False
         if price_change_10 < -1.0:
-            delta_divergence = (cvd_30 > cvd_prev * 1.3)
+            delta_divergence = (cvd_30 > cvd_prev * 1.2)  # 1.3 -> 1.2
         else:
-            delta_divergence = (cvd_30 > cvd_prev * 1.5)
+            delta_divergence = (cvd_30 > cvd_prev * 1.3)  # 1.5 -> 1.3
         
         if not delta_divergence:
             return None
@@ -669,10 +669,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     # RelVol
     if adjusted_rel_vol > 3.5: score += 3; reasons.append("🔥 RelVol")
     elif adjusted_rel_vol > 2.5: score += 2; reasons.append("RelVol yükseliyor")
+    elif adjusted_rel_vol > 1.8: score += 1; reasons.append("RelVol hafif")
 
     # RS
     if rs > 1.5: score += 4; reasons.append(f"🚀 RS {rs:.2f}")
     elif rs > 0.5: score += 2; reasons.append(f"✅ RS {rs:.2f}")
+    elif rs > -0.5: score += 1; reasons.append(f"➖ RS {rs:.2f}")
 
     # BB Sıkışma
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
@@ -704,8 +706,9 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     if rsi:
         if rsi < 25: score += 6; reasons.append(f"RSI{rsi:.0f} aşırı satım")
         elif rsi < 30: score += 4; reasons.append(f"RSI{rsi:.0f} dip")
+        elif rsi < 40: score += 2; reasons.append(f"RSI{rsi:.0f} düşük")
 
-    # Düşüş hızı yavaşlaması (Spot için önemli)
+    # Düşüş hızı yavaşlaması
     if len(closes) >= 3:
         drop_last = closes[-1] - closes[-2]
         drop_prev = closes[-2] - closes[-3]
@@ -715,6 +718,8 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     # Düşüş ödülü
     if change_5 < -2.0:
         score += 5; reasons.append("📉 Sert düşüş (dip fırsatı)")
+    elif change_5 < -1.0:
+        score += 3; reasons.append("📉 Düşüş (dip toplama)")
 
     # EMA Sıkışması
     ema9 = calculate_ema(closes, 9)
