@@ -27,7 +27,7 @@ COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 120
 MAX_SIGNALS_PER_ROUND = 3
 MIN_SCORE_SPOT = 33
-MIN_SCORE_FUTURE = 28
+MIN_SCORE_FUTURE = 30  # Düzeltilen LS mantığıyla daha anlamlı sinyaller için 30
 
 TP_MULT = 10
 SL_MULT = 5
@@ -478,7 +478,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (DİP DÖNÜŞÜ - FUTURES + SPOT)
+# SCAN COIN (DİP DÖNÜŞÜ - FUTURES + SPOT) - DÜZELTİLMİŞ
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -538,7 +538,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote = max(30_000, coin_median_vol * 0.50)  # Düşürüldü 50k -> 30k
+    min_quote = max(30_000, coin_median_vol * 0.50)
     if quote_vol < min_quote: return None
 
     # --- RelVol ---
@@ -550,6 +550,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     buy_sell_ratio = tbuy / sell_vol
 
     adjusted_rel_vol = raw_rel_vol * min(buy_sell_ratio, 2.0)
+
+    # DÜZELTME: Sahte RelVol patlamasını engelle (TRB örneği)
+    if quote_vol < 150_000 and adjusted_rel_vol > 3.0:
+        adjusted_rel_vol = 1.5
 
     if buy_sell_ratio < 1.0 or change_pct < -1.5:
         adjusted_rel_vol = 0.0
@@ -572,28 +576,34 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     price_10ago = float(closed[-10][4])
     price_change_10 = ((close_p - price_10ago) / price_10ago) * 100
 
-    # ========== FUTURES SPESİFİK FİLTRELER ==========
+    # ========== FUTURES SPESİFİK FİLTRELER (DÜZELTİLDİ) ==========
     futures_score = 0
     futures_reasons = []
 
     if is_futures:
-        # 1. LS değişimi (Short'lar azalıyor mu?)
+        # 1. LS değişimi (Short'lar azalıyor mu?) - Sadece fiyat yükselirken ve OI artarken
         ls_5m_change = 0.0
         try:
+            # DÜZELTME: Endpoint Top Trader, Limit 4 (Son 15 dakika)
             ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
-                                    "/futures/data/globalLongShortAccountRatio",
-                                    {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS_5M)
-            if ls5m and len(ls5m) >= 2:
-                ls_5m_prev = float(ls5m[-2]["longShortRatio"])
+                                    "/futures/data/topLongShortPositionRatio",
+                                    {"symbol": symbol, "period": "5m", "limit": 4}, CACHE_LS_5M)
+            if ls5m and len(ls5m) >= 4:
+                ls_5m_prev = float(ls5m[-4]["longShortRatio"])
                 ls_5m_curr = float(ls5m[-1]["longShortRatio"])
                 if ls_5m_prev > 0:
                     ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
-                    if ls_5m_change < -3.0:
-                        futures_score += 6
-                        futures_reasons.append(f"LS Short Squeeze %{ls_5m_change:.1f}")
-                    elif ls_5m_change < -1.5:
-                        futures_score += 3
-                        futures_reasons.append(f"LS Short azalıyor %{ls_5m_change:.1f}")
+                    
+                    # Fiyat yükseliyor ve OI artıyorsa = Short Squeeze
+                    if price_change > 0.3 and oi_change_pct > 1.5:
+                        if ls_5m_change < -3.0:
+                            futures_score += 6
+                            futures_reasons.append(f"LS Short Squeeze %{ls_5m_change:.1f}")
+                        elif ls_5m_change < -1.5:
+                            futures_score += 3
+                            futures_reasons.append(f"LS Short azalıyor %{ls_5m_change:.1f}")
+                    # Fiyat düşüyorsa, bu değişim anlamsız (long'lar azalıyor)
+                    # Bu yüzden puan vermiyoruz.
         except: pass
 
         # 2. OI artışı
@@ -628,11 +638,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                     futures_reasons.append(f"Negatif Funding %{funding_rate*100:.2f}")
         except: pass
 
-        # 4. Fiyat kırılım (direnç kırılımı)
+        # 4. Fiyat kırılım (direnç kırılımı) - DÜZELTME: Fiyat yükseliyor olmalı
         high_30 = max([float(k[2]) for k in kl_5m[-31:-1]]) if len(kl_5m) >= 31 else high
         distance_to_high = ((high_30 - close_p) / close_p) * 100 if close_p > 0 else 100
         near_breakout = distance_to_high < 2.5
-        breakout_pressure = near_breakout and (adjusted_rel_vol > 2.5)
+        
+        # DÜZELTME: Kırılım için fiyatın yukarı hareketi şart
+        breakout_pressure = near_breakout and (adjusted_rel_vol > 2.5) and (change_pct > 0.5)
         
         if breakout_pressure:
             futures_score += 5
@@ -649,9 +661,9 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
         # SPOT için Delta Divergence ZORUNLU (HAFİFLETİLDİ)
         delta_divergence = False
         if price_change_10 < -1.0:
-            delta_divergence = (cvd_30 > cvd_prev * 1.2)  # 1.3 -> 1.2
+            delta_divergence = (cvd_30 > cvd_prev * 1.2)
         else:
-            delta_divergence = (cvd_30 > cvd_prev * 1.3)  # 1.5 -> 1.3
+            delta_divergence = (cvd_30 > cvd_prev * 1.3)
         
         if not delta_divergence:
             return None
@@ -764,7 +776,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (FUTURES + SPOT)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (FUTURES + SPOT - DÜZELTİLDİ)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
