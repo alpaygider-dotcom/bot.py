@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timedelta
 
 # =========================================================
-# AYARLAR (DENGELİ)
+# AYARLAR
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -582,28 +582,31 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     else:
         delta_divergence = (cvd_30 > cvd_prev * 1.2)
 
-    # ========== FUTURES SPESİFİK FİLTRELER ==========
+    # ========== FUTURES SPESİFİK FİLTRELER (SENİN İSTEDİĞİN YER) ==========
     futures_score = 0
     futures_reasons = []
 
     if is_futures:
-        # 1. LS değişimi (Top Trader - 15 dakika trend)
+        # 1. LS değişimi (TÜM KULLANICILAR - Positions - SENİN GÖRDÜĞÜN YER)
         ls_5m_change = 0.0
+        ls_5m_curr = 0.0
         try:
+            # DOĞRU ENDPOINT: globalLongShortAccountRatio (Tüm kullanıcılar)
             ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
-                                    "/futures/data/topLongShortPositionRatio",
-                                    {"symbol": symbol, "period": "5m", "limit": 4}, CACHE_LS_5M)
-            if ls5m and len(ls5m) >= 4:
+                                    "/futures/data/globalLongShortAccountRatio",
+                                    {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS_5M)
+            if ls5m and len(ls5m) >= 2:
                 ls_5m_curr = float(ls5m[-1]["longShortRatio"])
-                ls_5m_prev = float(ls5m[-4]["longShortRatio"])
+                ls_5m_prev = float(ls5m[-2]["longShortRatio"])
                 if ls_5m_prev > 0:
                     ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
                     
-                    # Short Squeeze: LS seviyesi düşük (Short dominant) ve düşüyor
+                    # SENİN GÖRDÜĞÜN GRAFİK: Long/Short Ratio (Positions)
+                    # 1.5 altında ve düşüyorsa -> Short Squeeze
                     if ls_5m_curr < 1.5 and ls_5m_change < -2.0:
                         futures_score += 6
                         futures_reasons.append(f"LS Short Squeeze (Seviye {ls_5m_curr:.2f})")
-                    # Long azalıyor uyarısı (Yüksek LS seviyesi)
+                    # 2.0 üstünde ve düşüyorsa -> Long azalıyor (Uyarı)
                     elif ls_5m_curr > 2.0 and ls_5m_change < -2.0:
                         futures_score += 2
                         futures_reasons.append(f"LS Long azalıyor (Seviye {ls_5m_curr:.2f})")
@@ -613,7 +616,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                         futures_reasons.append(f"LS %{ls_5m_change:.1f} (Dikkat)")
         except: pass
 
-        # 2. OI artışı (Daha dengeli puan)
+        # 2. OI artışı
         oi_change_pct = 0.0
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
@@ -632,7 +635,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                         futures_reasons.append(f"OI %{oi_change_pct:.1f} artıyor")
         except: pass
 
-        # 3. Funding Rate (Daha düşük puan)
+        # 3. Funding Rate
         funding_rate = 0.0
         try:
             fr_data = await get_cached(session, "funding", symbol, FAPI_URL,
@@ -776,7 +779,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (DENGELİ - LS DÜZELTİLMİŞ)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (LS DÜZELTİLMİŞ - SENİN GÖRDÜĞÜN YER)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
