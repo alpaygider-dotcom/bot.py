@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timedelta
 
 # =========================================================
-# AYARLAR
+# AYARLAR (GEVŞETİLMİŞ)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -24,10 +24,10 @@ SPOT_GLOBAL_URL = "https://api.binance.com"
 
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
-GLOBAL_COOLDOWN = 120
+GLOBAL_COOLDOWN = 180  # 3 dakikada 1 sinyal
 MAX_SIGNALS_PER_ROUND = 3
-MIN_SCORE_SPOT = 33
-MIN_SCORE_FUTURE = 30  # Düzeltilen LS mantığıyla daha anlamlı sinyaller için 30
+MIN_SCORE_SPOT = 28  # Düşürüldü (33 -> 28)
+MIN_SCORE_FUTURE = 25 # Düşürüldü (30 -> 25)
 
 TP_MULT = 10
 SL_MULT = 5
@@ -478,7 +478,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (DİP DÖNÜŞÜ - FUTURES + SPOT) - DÜZELTİLMİŞ
+# SCAN COIN (DİP DÖNÜŞÜ - FUTURES + SPOT) - GEVŞETİLMİŞ
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -499,10 +499,10 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
         if now - last_signals[symbol] < dynamic_cooldown:
             return None
 
-    if daily_change is not None and daily_change > 8.0:
+    if daily_change is not None and daily_change > 10.0:
         return None
 
-    if not kl_5m or len(kl_5m) < 40:
+    if not kl_5m or len(kl_5m) < 30:
         return None
 
     closed = kl_5m[:-1]
@@ -515,30 +515,30 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     # 15dk trend kontrolü - SADECE UYARI, ELEME YOK
     trend_15m_up = True
-    if kl_15m and len(kl_15m) >= 20:
-        closes_15m = [float(k[4]) for k in kl_15m[-20:]]
-        ema20_15m = calculate_ema(closes_15m, 20)
+    if kl_15m and len(kl_15m) >= 15:
+        closes_15m = [float(k[4]) for k in kl_15m[-15:]]
+        ema20_15m = calculate_ema(closes_15m, 10)
         if ema20_15m and close_p < ema20_15m:
             trend_15m_up = False
 
-    # Son 5 mumda aşırı yükseliş kontrolü
+    # Son 5 mumda aşırı yükseliş kontrolü (gevşetildi)
     if len(closed) >= 5:
         open_5 = float(closed[-5][1])
         change_5 = ((close_p - open_5) / open_5) * 100
-        if change_5 > 4.0:
+        if change_5 > 5.0:
             return None
     else:
         change_5 = 0.0
 
     # Son mum aşırı düştüyse ele
-    if change_pct < -6.0:
+    if change_pct < -8.0:
         return None
 
     if 0.99 < close_p < 1.01 and abs(change_pct) < 0.1: return None
 
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote = max(30_000, coin_median_vol * 0.50)
+    min_quote = max(20_000, coin_median_vol * 0.30)
     if quote_vol < min_quote: return None
 
     # --- RelVol ---
@@ -551,40 +551,39 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     adjusted_rel_vol = raw_rel_vol * min(buy_sell_ratio, 2.0)
 
-    # DÜZELTME: Sahte RelVol patlamasını engelle (TRB örneği)
-    if quote_vol < 150_000 and adjusted_rel_vol > 3.0:
-        adjusted_rel_vol = 1.5
+    # Sahte RelVol koruması (gevşetildi)
+    if quote_vol < 100_000 and adjusted_rel_vol > 3.0:
+        adjusted_rel_vol = 1.8
 
-    if buy_sell_ratio < 1.0 or change_pct < -1.5:
+    if buy_sell_ratio < 0.8 or change_pct < -2.0:
         adjusted_rel_vol = 0.0
 
-    closes = [float(k[4]) for k in closed[-40:]]
-    highs = [float(k[2]) for k in closed[-40:]]
-    lows = [float(k[3]) for k in closed[-40:]]
-    volumes = [float(k[5]) for k in closed[-40:]]
+    closes = [float(k[4]) for k in closed[-30:]]
+    highs = [float(k[2]) for k in closed[-30:]]
+    lows = [float(k[3]) for k in closed[-30:]]
+    volumes = [float(k[5]) for k in closed[-30:]]
 
     # RS
-    if len(closes) >= 12:
-        coin_mom = (closes[-1] - closes[-12]) / closes[-12] * 100
+    if len(closes) >= 10:
+        coin_mom = (closes[-1] - closes[-10]) / closes[-10] * 100
         rs = coin_mom - btc_change
     else:
         rs = 0.0
 
-    # CVD / Delta Divergence (SPOT için zorunlu)
+    # CVD / Delta Divergence (SPOT için zorunlu - gevşetildi)
     cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
     cvd_prev = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-14:-7]])
     price_10ago = float(closed[-10][4])
     price_change_10 = ((close_p - price_10ago) / price_10ago) * 100
 
-    # ========== FUTURES SPESİFİK FİLTRELER (DÜZELTİLDİ) ==========
+    # ========== FUTURES SPESİFİK FİLTRELER ==========
     futures_score = 0
     futures_reasons = []
 
     if is_futures:
-        # 1. LS değişimi (Short'lar azalıyor mu?) - Sadece fiyat yükselirken ve OI artarken
+        # 1. LS değişimi (Top Trader)
         ls_5m_change = 0.0
         try:
-            # DÜZELTME: Endpoint Top Trader, Limit 4 (Son 15 dakika)
             ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
                                     "/futures/data/topLongShortPositionRatio",
                                     {"symbol": symbol, "period": "5m", "limit": 4}, CACHE_LS_5M)
@@ -595,33 +594,47 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                     ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
                     
                     # Fiyat yükseliyor ve OI artıyorsa = Short Squeeze
-                    if price_change > 0.3 and oi_change_pct > 1.5:
-                        if ls_5m_change < -3.0:
+                    oi_change_pct_local = 0.0
+                    try:
+                        oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
+                                                   "/futures/data/openInterestHist",
+                                                   {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
+                        if oi_data and len(oi_data) >= 2:
+                            oi_prev = float(oi_data[-2]["sumOpenInterest"])
+                            oi_curr = float(oi_data[-1]["sumOpenInterest"])
+                            if oi_prev > 0:
+                                oi_change_pct_local = ((oi_curr - oi_prev) / oi_prev) * 100
+                    except: pass
+
+                    if price_change > 0.3 and oi_change_pct_local > 1.0:
+                        if ls_5m_change < -2.5:
                             futures_score += 6
                             futures_reasons.append(f"LS Short Squeeze %{ls_5m_change:.1f}")
-                        elif ls_5m_change < -1.5:
+                        elif ls_5m_change < -1.0:
                             futures_score += 3
                             futures_reasons.append(f"LS Short azalıyor %{ls_5m_change:.1f}")
-                    # Fiyat düşüyorsa, bu değişim anlamsız (long'lar azalıyor)
-                    # Bu yüzden puan vermiyoruz.
+                    elif price_change > 0.1:
+                        if ls_5m_change < -3.0:
+                            futures_score += 3
+                            futures_reasons.append(f"LS %{ls_5m_change:.1f} (Dikkat)")
         except: pass
 
-        # 2. OI artışı
+        # 2. OI artışı (Futures için ekstra)
         oi_change_pct = 0.0
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
                                        "/futures/data/openInterestHist",
-                                       {"symbol": symbol, "period": "5m", "limit": 4}, CACHE_OI)
-            if oi_data and len(oi_data) >= 4:
-                oi_prev = float(oi_data[-4]["sumOpenInterest"])
+                                       {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
+            if oi_data and len(oi_data) >= 2:
+                oi_prev = float(oi_data[-2]["sumOpenInterest"])
                 oi_curr = float(oi_data[-1]["sumOpenInterest"])
                 if oi_prev > 0:
                     oi_change_pct = ((oi_curr - oi_prev) / oi_prev) * 100
                     if oi_change_pct > 3.0:
-                        futures_score += 5
+                        futures_score += 4
                         futures_reasons.append(f"OI %{oi_change_pct:.1f} (Akıllı para)")
                     elif oi_change_pct > 1.5:
-                        futures_score += 3
+                        futures_score += 2
                         futures_reasons.append(f"OI %{oi_change_pct:.1f} artıyor")
         except: pass
 
@@ -634,36 +647,35 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
             if fr_data and len(fr_data) > 0:
                 funding_rate = float(fr_data[0]["fundingRate"])
                 if funding_rate < -0.001:
-                    futures_score += 4
+                    futures_score += 3
                     futures_reasons.append(f"Negatif Funding %{funding_rate*100:.2f}")
         except: pass
 
-        # 4. Fiyat kırılım (direnç kırılımı) - DÜZELTME: Fiyat yükseliyor olmalı
+        # 4. Fiyat kırılım
         high_30 = max([float(k[2]) for k in kl_5m[-31:-1]]) if len(kl_5m) >= 31 else high
         distance_to_high = ((high_30 - close_p) / close_p) * 100 if close_p > 0 else 100
-        near_breakout = distance_to_high < 2.5
+        near_breakout = distance_to_high < 3.0
         
-        # DÜZELTME: Kırılım için fiyatın yukarı hareketi şart
-        breakout_pressure = near_breakout and (adjusted_rel_vol > 2.5) and (change_pct > 0.5)
+        breakout_pressure = near_breakout and (adjusted_rel_vol > 2.0) and (change_pct > 0.3)
         
         if breakout_pressure:
             futures_score += 5
             futures_reasons.append("⚡ Kırılım başlangıcı (Patlama öncesi)")
 
-        # Futures için Delta Divergence zorunlu değil (sadece bonus)
+        # Futures için Delta Divergence bonus
         delta_divergence = False
         if price_change_10 < -1.0:
-            delta_divergence = (cvd_30 > cvd_prev * 1.2)
+            delta_divergence = (cvd_30 > cvd_prev * 1.1)
             if delta_divergence:
                 futures_score += 3
                 futures_reasons.append("📉 Delta Divergence (Dönüş işareti)")
     else:
-        # SPOT için Delta Divergence ZORUNLU (HAFİFLETİLDİ)
+        # SPOT için Delta Divergence ZORUNLU (daha gevşek eşik)
         delta_divergence = False
-        if price_change_10 < -1.0:
-            delta_divergence = (cvd_30 > cvd_prev * 1.2)
+        if price_change_10 < -1.5:
+            delta_divergence = (cvd_30 > cvd_prev * 1.15)
         else:
-            delta_divergence = (cvd_30 > cvd_prev * 1.3)
+            delta_divergence = (cvd_30 > cvd_prev * 1.2)
         
         if not delta_divergence:
             return None
@@ -679,39 +691,39 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     # Ortak indikatörler (Hem spot hem futures)
     # RelVol
-    if adjusted_rel_vol > 3.5: score += 3; reasons.append("🔥 RelVol")
-    elif adjusted_rel_vol > 2.5: score += 2; reasons.append("RelVol yükseliyor")
-    elif adjusted_rel_vol > 1.8: score += 1; reasons.append("RelVol hafif")
+    if adjusted_rel_vol > 3.0: score += 3; reasons.append("🔥 RelVol")
+    elif adjusted_rel_vol > 2.0: score += 2; reasons.append("RelVol yükseliyor")
+    elif adjusted_rel_vol > 1.5: score += 1; reasons.append("RelVol hafif")
 
     # RS
     if rs > 1.5: score += 4; reasons.append(f"🚀 RS {rs:.2f}")
     elif rs > 0.5: score += 2; reasons.append(f"✅ RS {rs:.2f}")
-    elif rs > -0.5: score += 1; reasons.append(f"➖ RS {rs:.2f}")
+    elif rs > -1.0: score += 1; reasons.append(f"➖ RS {rs:.2f}")
 
-    # BB Sıkışma
+    # BB Sıkışma (gevşetildi)
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
     bb_widths = []
-    for i in range(20, len(closes)):
-        bb = calculate_bollinger(closes[:i], 20, 2)
+    for i in range(15, len(closes)):
+        bb = calculate_bollinger(closes[:i], 15, 2)
         if bb[0] is not None:
             bb_widths.append((bb[1] - bb[2]) / bb[0] if bb[0] > 0 else 1)
-    is_squeezing = len(bb_widths) >= 10 and min(bb_widths[-10:]) < median(bb_widths) * 0.5
-    if is_squeezing: score += 6; reasons.append("🎯 BB Sıkışma")
+    is_squeezing = len(bb_widths) >= 8 and min(bb_widths[-8:]) < median(bb_widths) * 0.6
+    if is_squeezing: score += 4; reasons.append("🎯 BB Sıkışma")
 
     # Volatilite Daralması
-    atr_now = calculate_atr(highs[-20:], lows[-20:], closes[-20:], 14)
-    atr_old = calculate_atr(highs[-34:-14], lows[-34:-14], closes[-34:-14], 14)
-    volatility_squeeze = atr_now and atr_old and atr_old > 0 and atr_now < atr_old * 0.70
-    if volatility_squeeze: score += 5; reasons.append("📉 Volatilite Daralması")
+    atr_now = calculate_atr(highs[-15:], lows[-15:], closes[-15:], 10)
+    atr_old = calculate_atr(highs[-25:-15], lows[-25:-15], closes[-25:-15], 10)
+    volatility_squeeze = atr_now and atr_old and atr_old > 0 and atr_now < atr_old * 0.75
+    if volatility_squeeze: score += 4; reasons.append("📉 Volatilite Daralması")
 
     # Hacim ivmesi
     last_3_vol = sum(volumes[-3:])
     prev_12_vol = sum(volumes[-15:-3]) if len(volumes) >= 15 else last_3_vol * 4
-    vol_acceleration = last_3_vol > prev_12_vol * 0.35
+    vol_acceleration = last_3_vol > prev_12_vol * 0.30
     if vol_acceleration: score += 3; reasons.append("🚀 Hacim İvmesi")
 
     # Net Alıcı Baskısı
-    if buy_sell_ratio > 1.8: score += 2; reasons.append("📊 Net Alıcı Baskısı")
+    if buy_sell_ratio > 1.5: score += 2; reasons.append("📊 Net Alıcı Baskısı")
 
     # RSI
     rsi = calculate_rsi(closes, 14)
@@ -725,26 +737,23 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
         drop_last = closes[-1] - closes[-2]
         drop_prev = closes[-2] - closes[-3]
         if drop_last < 0 and drop_prev < 0 and drop_last > drop_prev:
-            score += 5; reasons.append("🐢 Düşüş hızı yavaşlıyor")
+            score += 4; reasons.append("🐢 Düşüş hızı yavaşlıyor")
 
     # Düşüş ödülü
-    if change_5 < -2.0:
-        score += 5; reasons.append("📉 Sert düşüş (dip fırsatı)")
+    if change_5 < -2.5:
+        score += 4; reasons.append("📉 Sert düşüş (dip fırsatı)")
     elif change_5 < -1.0:
-        score += 3; reasons.append("📉 Düşüş (dip toplama)")
+        score += 2; reasons.append("📉 Düşüş (dip toplama)")
 
-    # EMA Sıkışması
+    # EMA Sıkışması (gevşetildi)
     ema9 = calculate_ema(closes, 9)
     ema21 = calculate_ema(closes, 21)
-    if ema9 and ema21 and (abs(ema9 - ema21) / close_p * 100) < 0.6:
-        score += 5; reasons.append("🌀 EMA Sıkışması")
+    if ema9 and ema21 and (abs(ema9 - ema21) / close_p * 100) < 1.0:
+        score += 4; reasons.append("🌀 EMA Sıkışması")
 
-    # Aynı coin cezası
-    if any(c == symbol for c, _ in recent_signal_coins): score -= 5
-
-    # 15dk trend cezası
+    # 15dk trend cezası (azaltıldı)
     if not trend_15m_up:
-        score -= 2
+        score -= 1
         reasons.append("⚠️ 15dk düşüş trendi")
 
     # Minimum skor kontrolü
@@ -776,7 +785,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (FUTURES + SPOT - DÜZELTİLDİ)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (GEVŞETİLMİŞ)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
@@ -835,7 +844,7 @@ async def main():
                 resp_5m = await asyncio.gather(*tasks_5m)
                 valid = {}
                 for s, r in zip(COIN_LIST, resp_5m):
-                    if r and len(r) >= 40: valid[s] = r
+                    if r and len(r) >= 30: valid[s] = r
 
                 scan_tasks = [scan_coin(session, s, s in futures_set, valid[s], k15m.get(s), btc_change, k1, daily_map.get(s))
                               for s in COIN_LIST if s in valid]
@@ -855,7 +864,7 @@ async def main():
                         if r['symbol'] in last_signals and now_ts - last_signals[r['symbol']] < COOLDOWN_BASE: continue
                         reasons = ", ".join(r['reasons'])
                         
-                        # Sinyal tipini belirle (Futures veya Spot)
+                        # Sinyal tipini belirle
                         signal_type = "⚡ FUTURES LONG" if r['is_futures'] else "🟢 SPOT LONG"
                         
                         msg = (
@@ -880,7 +889,7 @@ async def main():
                     if sent > 0: last_global = now_ts
                 if is_forced: pending_command = None
 
-                print(f"🔍 {len(all_res)} aday (Futures: {len([r for r in all_res if r['is_futures']])})")
+                print(f"🔍 {len(all_res)} aday (Min: {MIN_SCORE_SPOT}/{MIN_SCORE_FUTURE})")
                 consecutive_errors = 0
                 elapsed = time.time() - t0
                 await asyncio.sleep(max(0, 20 - elapsed))
