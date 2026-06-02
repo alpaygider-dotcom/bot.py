@@ -27,7 +27,7 @@ COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 180
 MAX_SIGNALS_PER_ROUND = 3
 MIN_SCORE_SPOT = 20
-MIN_SCORE_FUTURE = 18  # Düşürüldü (22 -> 18)
+MIN_SCORE_FUTURE = 20  # Hafif artırıldı (18 -> 20)
 
 TP_MULT = 10
 SL_MULT = 5
@@ -558,6 +558,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
         adjusted_rel_vol = 0.0
 
     closes = [float(k[4]) for k in closed[-40:]]
+    all_closes = [float(k[4]) for k in closed]  # Tüm geçmiş mumlar (RSI için)
     highs = [float(k[2]) for k in closed[-40:]]
     lows = [float(k[3]) for k in closed[-40:]]
     volumes = [float(k[5]) for k in closed[-40:]]
@@ -586,7 +587,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
     futures_reasons = []
 
     if is_futures:
-        # 1. LS değişimi (Sadece 15m ve 4h - API yükünü azaltmak için)
+        # 1. LS değişimi (Sadece 15m ve 4h)
         ls_periods = [{"period": "15m", "limit": 2}, {"period": "4h", "limit": 2}]
         ls_period_scores = {"15m": 3, "4h": 4}
         
@@ -616,17 +617,19 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
                 if rise_pct > 5:
                     return None
         
-        # 3. OI artışı (Daha güçlü puanlama)
+        # 3. OI artışı (Son 6 mum ortalaması ile karşılaştır)
         oi_change_pct = 0.0
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
                                        "/futures/data/openInterestHist",
-                                       {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_OI)
-            if oi_data and len(oi_data) >= 2:
-                oi_prev = float(oi_data[-2]["sumOpenInterest"])
-                oi_curr = float(oi_data[-1]["sumOpenInterest"])
-                if oi_prev > 0:
-                    oi_change_pct = ((oi_curr - oi_prev) / oi_prev) * 100
+                                       {"symbol": symbol, "period": "5m", "limit": 6}, CACHE_OI)
+            if oi_data and len(oi_data) >= 6:
+                # Son 5 mum ortalaması
+                last_5_oi = mean([float(d["sumOpenInterest"]) for d in oi_data[-5:]])
+                # Önceki 5 mum ortalaması
+                prev_5_oi = mean([float(d["sumOpenInterest"]) for d in oi_data[-10:-5]])
+                if prev_5_oi > 0:
+                    oi_change_pct = ((last_5_oi - prev_5_oi) / prev_5_oi) * 100
                     if oi_change_pct > 8:
                         futures_score += 4
                         futures_reasons.append(f"OI %{oi_change_pct:.1f} (Aşırı artış)")
@@ -638,7 +641,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
                         futures_reasons.append(f"OI %{oi_change_pct:.1f} (Artış)")
         except: pass
 
-        # 4. Funding Rate (Daha yumuşak eşik)
+        # 4. Funding Rate
         funding_rate = 0.0
         try:
             fr_data = await get_cached(session, "funding", symbol, FAPI_URL,
@@ -655,8 +658,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
         except: pass
 
         # 5. Short Squeeze Kombinasyonu (Güçlü sinyal)
-        # LS < -5% ve OI > 3% ve Price > -2% (fiyat çok düşmemiş)
-        # Bu kombinasyon için ayrı bir puan
+        # LS < -5% ve OI > 3% ve Price > 0.5% (fiyat yükseliyor)
         ls_15m_change = 0.0
         try:
             ls_data = await get_cached(session, "ls", f"{symbol}_15m", FAPI_URL,
@@ -669,7 +671,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
                     ls_15m_change = ((ls_curr - ls_prev) / ls_prev) * 100
         except: pass
 
-        if ls_15m_change < -5 and oi_change_pct > 3 and change_pct > -2:
+        if ls_15m_change < -5 and oi_change_pct > 3 and change_pct > 0.5:
             futures_score += 6
             futures_reasons.append(f"🔥 Short Squeeze Kombinasyonu")
 
@@ -702,10 +704,16 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
     elif adjusted_rel_vol > 2.0: score += 2; reasons.append("RelVol yükseliyor")
     elif adjusted_rel_vol > 1.5: score += 1; reasons.append("RelVol hafif")
 
-    # RS
+    # RS (Ceza sistemi eklendi)
     if rs > 1.5: score += 4; reasons.append(f"🚀 RS {rs:.2f}")
     elif rs > 0.5: score += 2; reasons.append(f"✅ RS {rs:.2f}")
     elif rs > -1.0: score += 1; reasons.append(f"➖ RS {rs:.2f}")
+    elif rs < -2.0:
+        score -= 4
+        reasons.append(f"🔻 RS {rs:.2f} (Aşırı zayıf)")
+    elif rs < -1.0:
+        score -= 2
+        reasons.append(f"🔻 RS {rs:.2f} (Zayıf)")
 
     # BB Sıkışma
     bb_mid, bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
@@ -723,21 +731,23 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
     volatility_squeeze = atr_now and atr_old and atr_old > 0 and atr_now < atr_old * 0.70
     if volatility_squeeze: score += 4; reasons.append("📉 Volatilite Daralması")
 
-    # Hacim ivmesi
-    last_3_vol = sum(volumes[-3:])
-    prev_12_vol = sum(volumes[-15:-3]) if len(volumes) >= 15 else last_3_vol * 4
-    vol_acceleration = last_3_vol > prev_12_vol * 0.30
-    if vol_acceleration: score += 3; reasons.append("🚀 Hacim İvmesi")
+    # Hacim ivmesi (REVİZE EDİLDİ - 1.5x eşik)
+    if len(volumes) >= 15:
+        avg_last3 = sum(volumes[-3:]) / 3
+        avg_prev12 = sum(volumes[-15:-3]) / 12
+        if avg_last3 > avg_prev12 * 1.5:
+            score += 3
+            reasons.append("🚀 Hacim İvmesi (1.5x)")
 
     # Net Alıcı Baskısı
     if buy_sell_ratio > 1.5: score += 2; reasons.append("📊 Net Alıcı Baskısı")
 
-    # RSI
-    rsi = calculate_rsi(closes, 14)
+    # RSI (REVİZE EDİLDİ - Daha düşük puan)
+    rsi = calculate_rsi(all_closes, 14)  # Tüm geçmiş mumlar kullanıldı
     if rsi:
-        if rsi < 25: score += 6; reasons.append(f"RSI{rsi:.0f} aşırı satım")
-        elif rsi < 30: score += 4; reasons.append(f"RSI{rsi:.0f} dip")
-        elif rsi < 40: score += 2; reasons.append(f"RSI{rsi:.0f} düşük")
+        if rsi < 25: score += 4; reasons.append(f"RSI{rsi:.0f} aşırı satım")
+        elif rsi < 30: score += 2; reasons.append(f"RSI{rsi:.0f} dip")
+        elif rsi < 40: score += 1; reasons.append(f"RSI{rsi:.0f} düşük")
 
     # Düşüş hızı yavaşlaması
     if len(closes) >= 3:
@@ -752,11 +762,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
     elif change_5 < -1.0:
         score += 2; reasons.append("📉 Düşüş (dip toplama)")
 
-    # EMA Sıkışması
+    # EMA Sıkışması (REVİZE EDİLDİ - Yön kontrolü eklendi)
     ema9 = calculate_ema(closes, 9)
     ema21 = calculate_ema(closes, 21)
-    if ema9 and ema21 and (abs(ema9 - ema21) / close_p * 100) < 1.0:
-        score += 4; reasons.append("🌀 EMA Sıkışması")
+    if ema9 and ema21 and ema9 > ema21 and (abs(ema9 - ema21) / close_p * 100) < 1.0:
+        score += 4
+        reasons.append("🌀 EMA Sıkışması (Yukarı yönlü)")
 
     # 15dk trend cezası
     if not trend_15m_up:
@@ -778,9 +789,13 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
 
     conf = min(95, 55 + score * 2)
 
+    # Canlı fiyatı al (Sinyal gönderirken güncel fiyat)
+    live_close_p = float(kl_5m[-1][4])
+
     return {
         "symbol": symbol, "score": score, "conf": conf,
-        "price": round(close_p, 4), "change": round(change_pct, 2),
+        "price": round(live_close_p, 4),  # Canlı fiyat
+        "change": round(daily_change, 2) if daily_change is not None else round(change_pct, 2),  # Günlük değişim
         "rs": round(rs, 2), "rel_vol": adjusted_rel_vol,
         "tp": tp_price, "sl": sl_price, "tp_pct": round(tp_pct, 2), "sl_pct": round(sl_pct, 2),
         "reasons": reasons,
@@ -792,7 +807,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, dail
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (REVİZE EDİLMİŞ - OPTİMİZE)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (REVİZE EDİLMİŞ - TONUSDT HATASI DÜZELTİLDİ)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
@@ -826,7 +841,7 @@ async def main():
                     if btc_open > 0:
                         btc_change = ((btc_close - btc_open) / btc_open) * 100
 
-                # Klines 15m verilerini toplu çek (gerekli değilse bile çekiliyor, kullanılabilir)
+                # Klines 15m verilerini toplu çek
                 tasks_15m = {}
                 for s in COIN_LIST:
                     base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
@@ -837,12 +852,13 @@ async def main():
                 vals_15m = await asyncio.gather(*[tasks_15m[k] for k in keys_15m])
                 k15m = {k: v for k, v in zip(keys_15m, vals_15m) if v is not None}
 
+                # Klines 5m verilerini toplu çek (limit 200 - RSI için yeterli)
                 tasks_5m = []
                 for s in COIN_LIST:
                     base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
                     ep = "/fapi/v1/klines" if s in futures_set else "/api/v3/klines"
                     tasks_5m.append(get_cached(session, "klines_5m", s, base, ep,
-                                               {"symbol": s, "interval": "5m", "limit": 72}, CACHE_5M))  # 72 mum = 6 saat
+                                               {"symbol": s, "interval": "5m", "limit": 200}, CACHE_5M))
                 resp_5m = await asyncio.gather(*tasks_5m)
                 valid = {}
                 for s, r in zip(COIN_LIST, resp_5m):
