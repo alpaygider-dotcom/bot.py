@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timedelta
 
 # =========================================================
-# AYARLAR
+# AYARLAR (FUTURES + SPOT - SON HALİ)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -26,8 +26,8 @@ SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 180
 MAX_SIGNALS_PER_ROUND = 3
-MIN_SCORE_SPOT = 25
-MIN_SCORE_FUTURE = 27
+MIN_SCORE_SPOT = 20
+MIN_SCORE_FUTURE = 22
 
 TP_MULT = 10
 SL_MULT = 5
@@ -101,31 +101,6 @@ TR_COIN_LIST = sorted([
     "BEAMX", "COW", "CELO", "SOPH", "AUCTION", "SKY",
     "U", "MASK", "ACX", "A", "PHB"
 ])
-
-# =========================================================
-# HATA AYIKLAMA (FUTURES MONITOR 0 COIN DÜZELTME)
-# =========================================================
-def debug_futures_monitor(futures_set, tr_symbols):
-    """Futures Monitor'ın neden 0 coin gördüğünü debug eder"""
-    print("=" * 50)
-    print("🔍 FUTURES MONITOR DEBUG")
-    print("=" * 50)
-    
-    print(f"✅ TR_COIN_LIST boyutu: {len(TR_COIN_LIST)}")
-    print(f"✅ TR_COIN_LIST örnek: {TR_COIN_LIST[:5]}")
-    print(f"✅ Futures set boyutu: {len(futures_set)}")
-    if len(futures_set) > 0:
-        print(f"✅ Futures set örnek: {list(futures_set)[:5]}")
-    else:
-        print("❌ Futures set boş! Binance API'den veri gelmiyor.")
-    
-    intersect = [s for s in tr_symbols if s in futures_set]
-    print(f"✅ Kesişen coin sayısı: {len(intersect)}")
-    if len(intersect) > 0:
-        print(f"✅ Kesişen coin örnek: {intersect[:5]}")
-    else:
-        print("❌ Kesişim yok! TR_COIN_LIST'teki coinler futures'da mevcut değil.")
-    print("=" * 50)
 
 cache = {"funding": {}, "oi": {}, "ls_5m": {}, "klines_5m": {}, "klines_15m": {}, "klines_1h": {}}
 last_signals = {}
@@ -503,7 +478,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (DİP DÖNÜŞÜ - SPOT AKTİF)
+# SCAN COIN (DİP DÖNÜŞÜ - FUTURES + SPOT - SON HALİ)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -595,7 +570,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     else:
         rs = 0.0
 
-    # CVD / Delta Divergence (SPOT İÇİN ZORUNLU DEĞİL, BONUS)
+    # CVD / Delta Divergence (SPOT için bonus)
     cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
     cvd_prev = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-14:-7]])
     price_10ago = float(closed[-10][4])
@@ -607,36 +582,65 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     else:
         delta_divergence = (cvd_30 > cvd_prev * 1.2)
 
-    # ========== FUTURES SPESİFİK FİLTRELER ==========
+    # ========== FUTURES SPESİFİK FİLTRELER (SENİN İSTEĞİN) ==========
     futures_score = 0
     futures_reasons = []
 
     if is_futures:
-        # 1. LS değişimi (globalLongShortAccountRatio - Senin gördüğün yer)
-        ls_5m_change = 0.0
-        ls_5m_curr = 0.0
-        try:
-            ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
-                                    "/futures/data/globalLongShortAccountRatio",
-                                    {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS_5M)
-            if ls5m and len(ls5m) >= 2:
-                ls_5m_curr = float(ls5m[-1]["longShortRatio"])
-                ls_5m_prev = float(ls5m[-2]["longShortRatio"])
-                if ls_5m_prev > 0:
-                    ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
-                    
-                    if ls_5m_curr < 1.5 and ls_5m_change < -2.0:
-                        futures_score += 6
-                        futures_reasons.append(f"LS Short Squeeze (Seviye {ls_5m_curr:.2f})")
-                    elif ls_5m_curr > 2.0 and ls_5m_change < -2.0:
-                        futures_score += 2
-                        futures_reasons.append(f"LS Long azalıyor (Seviye {ls_5m_curr:.2f})")
-                    elif ls_5m_change < -2.0:
-                        futures_score += 1
-                        futures_reasons.append(f"LS %{ls_5m_change:.1f} (Dikkat)")
-        except: pass
-
-        # 2. OI artışı
+        # 1. Long/Short Ratio (Accounts) - SENİN KIRMIZI ÇİZDİĞİN YER
+        # 5 dk, 15 dk, 30 dk, 1 saat, 6 saat, 12 saat dilimlerinde büyük düşüş kontrolü
+        ls_periods = [
+            {"period": "5m", "limit": 2},
+            {"period": "15m", "limit": 2},
+            {"period": "30m", "limit": 2},
+            {"period": "1h", "limit": 2},
+            {"period": "6h", "limit": 2},
+            {"period": "12h", "limit": 2}
+        ]
+        
+        for p in ls_periods:
+            try:
+                ls_data = await get_cached(session, "ls_5m", f"{symbol}_{p['period']}", FAPI_URL,
+                                          "/futures/data/globalLongShortAccountRatio",
+                                          {"symbol": symbol, "period": p["period"], "limit": p["limit"]}, CACHE_LS_5M)
+                if ls_data and len(ls_data) >= 2:
+                    ls_prev = float(ls_data[-2]["longShortRatio"])
+                    ls_curr = float(ls_data[-1]["longShortRatio"])
+                    if ls_prev > 0:
+                        ls_change = ((ls_curr - ls_prev) / ls_prev) * 100
+                        # Büyük düşüş: %10 veya daha fazla
+                        if ls_change <= -10:
+                            futures_score += 2
+                            futures_reasons.append(f"LS %{ls_change:.1f} ({p['period']})")
+            except: pass
+        
+        # 2. Coin çok yükselmişse sinyali iptal et (5 dk, 15 dk, 30 dk, 1 saat, 3 saat, 6 saat)
+        price_periods = [
+            {"interval": "5m", "limit": 2},
+            {"interval": "15m", "limit": 2},
+            {"interval": "30m", "limit": 2},
+            {"interval": "1h", "limit": 2},
+            {"interval": "3h", "limit": 2},
+            {"interval": "6h", "limit": 2}
+        ]
+        
+        for p in price_periods:
+            try:
+                base = FAPI_URL if is_futures else SPOT_GLOBAL_URL
+                ep = "/fapi/v1/klines" if is_futures else "/api/v3/klines"
+                klines = await get_cached(session, "klines_5m", f"{symbol}_{p['interval']}", base, ep,
+                                          {"symbol": symbol, "interval": p["interval"], "limit": p["limit"]}, CACHE_5M)
+                if klines and len(klines) >= 2:
+                    prev_close = float(klines[0][4])
+                    curr_close = float(klines[1][4])
+                    if prev_close > 0:
+                        price_change_pct = ((curr_close - prev_close) / prev_close) * 100
+                        # %5'ten fazla yükselmişse sinyali iptal et
+                        if price_change_pct > 5:
+                            return None
+            except: pass
+        
+        # 3. Ekstra: OI artışı (destekleyici)
         oi_change_pct = 0.0
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
@@ -647,15 +651,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                 oi_curr = float(oi_data[-1]["sumOpenInterest"])
                 if oi_prev > 0:
                     oi_change_pct = ((oi_curr - oi_prev) / oi_prev) * 100
-                    if oi_change_pct > 3.0:
-                        futures_score += 2
-                        futures_reasons.append(f"OI %{oi_change_pct:.1f} (Akıllı para)")
-                    elif oi_change_pct > 1.5:
+                    if oi_change_pct > 1.0:
                         futures_score += 1
-                        futures_reasons.append(f"OI %{oi_change_pct:.1f} artıyor")
+                        futures_reasons.append(f"OI %{oi_change_pct:.1f}")
         except: pass
 
-        # 3. Funding Rate
+        # 4. Ekstra: Negatif Funding
         funding_rate = 0.0
         try:
             fr_data = await get_cached(session, "funding", symbol, FAPI_URL,
@@ -667,22 +668,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                     futures_score += 1
                     futures_reasons.append(f"Negatif Funding %{funding_rate*100:.2f}")
         except: pass
-
-        # 4. Fiyat kırılım
-        high_30 = max([float(k[2]) for k in kl_5m[-31:-1]]) if len(kl_5m) >= 31 else high
-        distance_to_high = ((high_30 - close_p) / close_p) * 100 if close_p > 0 else 100
-        near_breakout = distance_to_high < 2.5
-        
-        breakout_pressure = near_breakout and (adjusted_rel_vol > 2.0) and (change_pct > 0.3)
-        
-        if breakout_pressure:
-            futures_score += 5
-            futures_reasons.append("⚡ Kırılım başlangıcı")
-
-        # Futures için Delta Divergence bonus
-        if delta_divergence:
-            futures_score += 2
-            futures_reasons.append("📉 Delta Divergence")
 
     else:
         # SPOT: Delta Divergence bonus (ZORUNLU DEĞİL)
@@ -803,7 +788,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (SPOT AKTİF)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (FUTURES + SPOT - SON HALİ)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
@@ -812,10 +797,6 @@ async def main():
 
         COIN_LIST = get_tr_coin_list()
         futures_set = await get_futures_symbols(session)
-        
-        # Debug: Futures Monitor neden 0 coin gösteriyor?
-        debug_futures_monitor(futures_set, COIN_LIST)
-        
         await send_telegram(session, f"🎯 Futures + Spot ({len(COIN_LIST)} coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
