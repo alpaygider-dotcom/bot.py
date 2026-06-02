@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timedelta
 
 # =========================================================
-# AYARLAR (SPOT AKTİF)
+# AYARLAR
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -26,7 +26,7 @@ SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 180
 MAX_SIGNALS_PER_ROUND = 3
-MIN_SCORE_SPOT = 25  # Düşürüldü (30 -> 25)
+MIN_SCORE_SPOT = 25
 MIN_SCORE_FUTURE = 27
 
 TP_MULT = 10
@@ -101,6 +101,31 @@ TR_COIN_LIST = sorted([
     "BEAMX", "COW", "CELO", "SOPH", "AUCTION", "SKY",
     "U", "MASK", "ACX", "A", "PHB"
 ])
+
+# =========================================================
+# HATA AYIKLAMA (FUTURES MONITOR 0 COIN DÜZELTME)
+# =========================================================
+def debug_futures_monitor(futures_set, tr_symbols):
+    """Futures Monitor'ın neden 0 coin gördüğünü debug eder"""
+    print("=" * 50)
+    print("🔍 FUTURES MONITOR DEBUG")
+    print("=" * 50)
+    
+    print(f"✅ TR_COIN_LIST boyutu: {len(TR_COIN_LIST)}")
+    print(f"✅ TR_COIN_LIST örnek: {TR_COIN_LIST[:5]}")
+    print(f"✅ Futures set boyutu: {len(futures_set)}")
+    if len(futures_set) > 0:
+        print(f"✅ Futures set örnek: {list(futures_set)[:5]}")
+    else:
+        print("❌ Futures set boş! Binance API'den veri gelmiyor.")
+    
+    intersect = [s for s in tr_symbols if s in futures_set]
+    print(f"✅ Kesişen coin sayısı: {len(intersect)}")
+    if len(intersect) > 0:
+        print(f"✅ Kesişen coin örnek: {intersect[:5]}")
+    else:
+        print("❌ Kesişim yok! TR_COIN_LIST'teki coinler futures'da mevcut değil.")
+    print("=" * 50)
 
 cache = {"funding": {}, "oi": {}, "ls_5m": {}, "klines_5m": {}, "klines_15m": {}, "klines_1h": {}}
 last_signals = {}
@@ -538,7 +563,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote = max(20_000, coin_median_vol * 0.30)  # Düşürüldü (30k -> 20k)
+    min_quote = max(20_000, coin_median_vol * 0.30)
     if quote_vol < min_quote: return None
 
     # --- RelVol ---
@@ -787,6 +812,10 @@ async def main():
 
         COIN_LIST = get_tr_coin_list()
         futures_set = await get_futures_symbols(session)
+        
+        # Debug: Futures Monitor neden 0 coin gösteriyor?
+        debug_futures_monitor(futures_set, COIN_LIST)
+        
         await send_telegram(session, f"🎯 Futures + Spot ({len(COIN_LIST)} coin) | /report")
         print(f"✅ {len(COIN_LIST)} coin taranıyor ({len(futures_set)} futures)")
 
