@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timedelta
 
 # =========================================================
-# AYARLAR (FUTURES + SPOT - SON HALİ)
+# AYARLAR (REVİZE EDİLMİŞ)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -27,7 +27,7 @@ COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 180
 MAX_SIGNALS_PER_ROUND = 3
 MIN_SCORE_SPOT = 20
-MIN_SCORE_FUTURE = 22
+MIN_SCORE_FUTURE = 18  # Düşürüldü (22 -> 18)
 
 TP_MULT = 10
 SL_MULT = 5
@@ -35,10 +35,10 @@ MAX_TP_PCT = 8.0
 
 CACHE_5M = 35
 CACHE_15M = 60
-CACHE_1H = 300
+CACHE_4H = 240
 CACHE_OI = 60
 CACHE_FUNDING = 300
-CACHE_LS_5M = 60
+CACHE_LS = 60
 
 BATCH_SIZE = 25
 MAX_CONSECUTIVE_ERRORS = 15
@@ -102,7 +102,7 @@ TR_COIN_LIST = sorted([
     "U", "MASK", "ACX", "A", "PHB"
 ])
 
-cache = {"funding": {}, "oi": {}, "ls_5m": {}, "klines_5m": {}, "klines_15m": {}, "klines_1h": {}}
+cache = {"funding": {}, "oi": {}, "ls": {}, "klines_5m": {}, "klines_15m": {}}
 last_signals = {}
 bot_running = True
 pending_command = None
@@ -478,9 +478,9 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (DİP DÖNÜŞÜ - FUTURES + SPOT - SON HALİ)
+# SCAN COIN (DİP DÖNÜŞÜ - REVİZE EDİLMİŞ)
 # =========================================================
-async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klines_1h, daily_change):
+async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, daily_change):
     global recent_signal_coins
 
     now = time.time()
@@ -551,7 +551,6 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     adjusted_rel_vol = raw_rel_vol * min(buy_sell_ratio, 2.0)
 
-    # Sahte RelVol koruması
     if quote_vol < 100_000 and adjusted_rel_vol > 3.0:
         adjusted_rel_vol = 1.5
 
@@ -582,65 +581,42 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     else:
         delta_divergence = (cvd_30 > cvd_prev * 1.2)
 
-    # ========== FUTURES SPESİFİK FİLTRELER (SENİN İSTEĞİN) ==========
+    # ========== FUTURES SPESİFİK FİLTRELER (REVİZE EDİLMİŞ) ==========
     futures_score = 0
     futures_reasons = []
 
     if is_futures:
-        # 1. Long/Short Ratio (Accounts) - SENİN KIRMIZI ÇİZDİĞİN YER
-        # 5 dk, 15 dk, 30 dk, 1 saat, 6 saat, 12 saat dilimlerinde büyük düşüş kontrolü
-        ls_periods = [
-            {"period": "5m", "limit": 2},
-            {"period": "15m", "limit": 2},
-            {"period": "30m", "limit": 2},
-            {"period": "1h", "limit": 2},
-            {"period": "6h", "limit": 2},
-            {"period": "12h", "limit": 2}
-        ]
+        # 1. LS değişimi (Sadece 15m ve 4h - API yükünü azaltmak için)
+        ls_periods = [{"period": "15m", "limit": 2}, {"period": "4h", "limit": 2}]
+        ls_period_scores = {"15m": 3, "4h": 4}
         
         for p in ls_periods:
             try:
-                ls_data = await get_cached(session, "ls_5m", f"{symbol}_{p['period']}", FAPI_URL,
+                ls_data = await get_cached(session, "ls", f"{symbol}_{p['period']}", FAPI_URL,
                                           "/futures/data/globalLongShortAccountRatio",
-                                          {"symbol": symbol, "period": p["period"], "limit": p["limit"]}, CACHE_LS_5M)
+                                          {"symbol": symbol, "period": p["period"], "limit": p["limit"]}, CACHE_LS)
                 if ls_data and len(ls_data) >= 2:
                     ls_prev = float(ls_data[-2]["longShortRatio"])
                     ls_curr = float(ls_data[-1]["longShortRatio"])
                     if ls_prev > 0:
                         ls_change = ((ls_curr - ls_prev) / ls_prev) * 100
-                        # Büyük düşüş: %10 veya daha fazla
-                        if ls_change <= -10:
-                            futures_score += 2
+                        
+                        # Eşikler: 15m için -3%, 4h için -5%
+                        threshold = -3 if p["period"] == "15m" else -5
+                        if ls_change <= threshold:
+                            futures_score += ls_period_scores[p["period"]]
                             futures_reasons.append(f"LS %{ls_change:.1f} ({p['period']})")
             except: pass
         
-        # 2. Coin çok yükselmişse sinyali iptal et (5 dk, 15 dk, 30 dk, 1 saat, 3 saat, 6 saat)
-        price_periods = [
-            {"interval": "5m", "limit": 2},
-            {"interval": "15m", "limit": 2},
-            {"interval": "30m", "limit": 2},
-            {"interval": "1h", "limit": 2},
-            {"interval": "3h", "limit": 2},
-            {"interval": "6h", "limit": 2}
-        ]
+        # 2. Fiyat kontrolü (Son 72 mum = 6 saat içinde %5'ten fazla yükselmişse iptal)
+        if len(closed) >= 72:
+            recent_low = min(closes[-72:])
+            if recent_low > 0:
+                rise_pct = ((close_p - recent_low) / recent_low) * 100
+                if rise_pct > 5:
+                    return None
         
-        for p in price_periods:
-            try:
-                base = FAPI_URL if is_futures else SPOT_GLOBAL_URL
-                ep = "/fapi/v1/klines" if is_futures else "/api/v3/klines"
-                klines = await get_cached(session, "klines_5m", f"{symbol}_{p['interval']}", base, ep,
-                                          {"symbol": symbol, "interval": p["interval"], "limit": p["limit"]}, CACHE_5M)
-                if klines and len(klines) >= 2:
-                    prev_close = float(klines[0][4])
-                    curr_close = float(klines[1][4])
-                    if prev_close > 0:
-                        price_change_pct = ((curr_close - prev_close) / prev_close) * 100
-                        # %5'ten fazla yükselmişse sinyali iptal et
-                        if price_change_pct > 5:
-                            return None
-            except: pass
-        
-        # 3. Ekstra: OI artışı (destekleyici)
+        # 3. OI artışı (Daha güçlü puanlama)
         oi_change_pct = 0.0
         try:
             oi_data = await get_cached(session, "oi", symbol, FAPI_URL,
@@ -651,12 +627,18 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                 oi_curr = float(oi_data[-1]["sumOpenInterest"])
                 if oi_prev > 0:
                     oi_change_pct = ((oi_curr - oi_prev) / oi_prev) * 100
-                    if oi_change_pct > 1.0:
-                        futures_score += 1
-                        futures_reasons.append(f"OI %{oi_change_pct:.1f}")
+                    if oi_change_pct > 8:
+                        futures_score += 4
+                        futures_reasons.append(f"OI %{oi_change_pct:.1f} (Aşırı artış)")
+                    elif oi_change_pct > 5:
+                        futures_score += 3
+                        futures_reasons.append(f"OI %{oi_change_pct:.1f} (Güçlü artış)")
+                    elif oi_change_pct > 3:
+                        futures_score += 2
+                        futures_reasons.append(f"OI %{oi_change_pct:.1f} (Artış)")
         except: pass
 
-        # 4. Ekstra: Negatif Funding
+        # 4. Funding Rate (Daha yumuşak eşik)
         funding_rate = 0.0
         try:
             fr_data = await get_cached(session, "funding", symbol, FAPI_URL,
@@ -664,17 +646,39 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                                        {"symbol": symbol, "limit": 1}, CACHE_FUNDING)
             if fr_data and len(fr_data) > 0:
                 funding_rate = float(fr_data[0]["fundingRate"])
-                if funding_rate < -0.001:
-                    futures_score += 1
+                if funding_rate < -0.0005:
+                    futures_score += 2
                     futures_reasons.append(f"Negatif Funding %{funding_rate*100:.2f}")
+                elif funding_rate < 0:
+                    futures_score += 1
+                    futures_reasons.append(f"Hafif Negatif Funding %{funding_rate*100:.2f}")
         except: pass
 
+        # 5. Short Squeeze Kombinasyonu (Güçlü sinyal)
+        # LS < -5% ve OI > 3% ve Price > -2% (fiyat çok düşmemiş)
+        # Bu kombinasyon için ayrı bir puan
+        ls_15m_change = 0.0
+        try:
+            ls_data = await get_cached(session, "ls", f"{symbol}_15m", FAPI_URL,
+                                      "/futures/data/globalLongShortAccountRatio",
+                                      {"symbol": symbol, "period": "15m", "limit": 2}, CACHE_LS)
+            if ls_data and len(ls_data) >= 2:
+                ls_prev = float(ls_data[-2]["longShortRatio"])
+                ls_curr = float(ls_data[-1]["longShortRatio"])
+                if ls_prev > 0:
+                    ls_15m_change = ((ls_curr - ls_prev) / ls_prev) * 100
+        except: pass
+
+        if ls_15m_change < -5 and oi_change_pct > 3 and change_pct > -2:
+            futures_score += 6
+            futures_reasons.append(f"🔥 Short Squeeze Kombinasyonu")
+
     else:
-        # SPOT: Delta Divergence bonus (ZORUNLU DEĞİL)
+        # SPOT: Delta Divergence bonus
         if delta_divergence:
             futures_score += 5
             futures_reasons.append("🔥 Delta Divergence")
-        # SPOT için ekstra: Düşük fiyatlı coinler bonus
+        # SPOT için ekstra: Düşük fiyatlı coinler
         if close_p < 0.10:
             futures_score += 2
             futures_reasons.append("💎 Düşük Fiyatlı Coin")
@@ -788,7 +792,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (FUTURES + SPOT - SON HALİ)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (REVİZE EDİLMİŞ - OPTİMİZE)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
@@ -822,12 +826,7 @@ async def main():
                     if btc_open > 0:
                         btc_change = ((btc_close - btc_open) / btc_open) * 100
 
-                fut_list = [s for s in COIN_LIST if s in futures_set]
-                tasks_1h = [get_cached(session, "klines_1h", s, FAPI_URL, "/fapi/v1/klines",
-                                       {"symbol": s, "interval": "1h", "limit": 20}, CACHE_1H) for s in fut_list]
-                r1 = await asyncio.gather(*tasks_1h)
-                k1 = {s: r for s, r in zip(fut_list, r1) if r is not None}
-
+                # Klines 15m verilerini toplu çek (gerekli değilse bile çekiliyor, kullanılabilir)
                 tasks_15m = {}
                 for s in COIN_LIST:
                     base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
@@ -843,13 +842,13 @@ async def main():
                     base = FAPI_URL if s in futures_set else SPOT_GLOBAL_URL
                     ep = "/fapi/v1/klines" if s in futures_set else "/api/v3/klines"
                     tasks_5m.append(get_cached(session, "klines_5m", s, base, ep,
-                                               {"symbol": s, "interval": "5m", "limit": 50}, CACHE_5M))
+                                               {"symbol": s, "interval": "5m", "limit": 72}, CACHE_5M))  # 72 mum = 6 saat
                 resp_5m = await asyncio.gather(*tasks_5m)
                 valid = {}
                 for s, r in zip(COIN_LIST, resp_5m):
                     if r and len(r) >= 40: valid[s] = r
 
-                scan_tasks = [scan_coin(session, s, s in futures_set, valid[s], k15m.get(s), btc_change, k1, daily_map.get(s))
+                scan_tasks = [scan_coin(session, s, s in futures_set, valid[s], k15m.get(s), btc_change, daily_map.get(s))
                               for s in COIN_LIST if s in valid]
                 all_res = []
                 for i in range(0, len(scan_tasks), BATCH_SIZE):
@@ -867,7 +866,6 @@ async def main():
                         if r['symbol'] in last_signals and now_ts - last_signals[r['symbol']] < COOLDOWN_BASE: continue
                         reasons = ", ".join(r['reasons'])
                         
-                        # Sinyal tipini belirle
                         signal_type = "⚡ FUTURES LONG" if r['is_futures'] else "🟢 SPOT LONG"
                         
                         msg = (
