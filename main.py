@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timedelta
 
 # =========================================================
-# AYARLAR
+# AYARLAR (SPOT AKTİF)
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -25,8 +25,8 @@ SPOT_GLOBAL_URL = "https://api.binance.com"
 SCAN_INTERVAL = 20
 COOLDOWN_BASE = 3600
 GLOBAL_COOLDOWN = 180
-MAX_SIGNALS_PER_ROUND = 2
-MIN_SCORE_SPOT = 30
+MAX_SIGNALS_PER_ROUND = 3
+MIN_SCORE_SPOT = 25  # Düşürüldü (30 -> 25)
 MIN_SCORE_FUTURE = 27
 
 TP_MULT = 10
@@ -478,7 +478,7 @@ async def get_daily_change_map(session, symbols):
     return cmap
 
 # =========================================================
-# SCAN COIN (DİP DÖNÜŞÜ - SON HALİ)
+# SCAN COIN (DİP DÖNÜŞÜ - SPOT AKTİF)
 # =========================================================
 async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klines_1h, daily_change):
     global recent_signal_coins
@@ -538,7 +538,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 
     vol_history = [float(k[5]) for k in kl_5m[-20:-1]]
     coin_median_vol = median(vol_history) if vol_history else vol
-    min_quote = max(30_000, coin_median_vol * 0.40)
+    min_quote = max(20_000, coin_median_vol * 0.30)  # Düşürüldü (30k -> 20k)
     if quote_vol < min_quote: return None
 
     # --- RelVol ---
@@ -552,7 +552,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     adjusted_rel_vol = raw_rel_vol * min(buy_sell_ratio, 2.0)
 
     # Sahte RelVol koruması
-    if quote_vol < 150_000 and adjusted_rel_vol > 3.0:
+    if quote_vol < 100_000 and adjusted_rel_vol > 3.0:
         adjusted_rel_vol = 1.5
 
     if buy_sell_ratio < 0.8 or change_pct < -2.0:
@@ -570,7 +570,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     else:
         rs = 0.0
 
-    # CVD / Delta Divergence (ARTIK ZORUNLU DEĞİL)
+    # CVD / Delta Divergence (SPOT İÇİN ZORUNLU DEĞİL, BONUS)
     cvd_30 = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-7:]])
     cvd_prev = sum([float(k[9]) - (float(k[5]) - float(k[9])) for k in kl_5m[-14:-7]])
     price_10ago = float(closed[-10][4])
@@ -582,16 +582,15 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
     else:
         delta_divergence = (cvd_30 > cvd_prev * 1.2)
 
-    # ========== FUTURES SPESİFİK FİLTRELER (SENİN İSTEDİĞİN YER) ==========
+    # ========== FUTURES SPESİFİK FİLTRELER ==========
     futures_score = 0
     futures_reasons = []
 
     if is_futures:
-        # 1. LS değişimi (TÜM KULLANICILAR - Positions - SENİN GÖRDÜĞÜN YER)
+        # 1. LS değişimi (globalLongShortAccountRatio - Senin gördüğün yer)
         ls_5m_change = 0.0
         ls_5m_curr = 0.0
         try:
-            # DOĞRU ENDPOINT: globalLongShortAccountRatio (Tüm kullanıcılar)
             ls5m = await get_cached(session, "ls_5m", symbol, FAPI_URL,
                                     "/futures/data/globalLongShortAccountRatio",
                                     {"symbol": symbol, "period": "5m", "limit": 2}, CACHE_LS_5M)
@@ -601,16 +600,12 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
                 if ls_5m_prev > 0:
                     ls_5m_change = ((ls_5m_curr - ls_5m_prev) / ls_5m_prev) * 100
                     
-                    # SENİN GÖRDÜĞÜN GRAFİK: Long/Short Ratio (Positions)
-                    # 1.5 altında ve düşüyorsa -> Short Squeeze
                     if ls_5m_curr < 1.5 and ls_5m_change < -2.0:
                         futures_score += 6
                         futures_reasons.append(f"LS Short Squeeze (Seviye {ls_5m_curr:.2f})")
-                    # 2.0 üstünde ve düşüyorsa -> Long azalıyor (Uyarı)
                     elif ls_5m_curr > 2.0 and ls_5m_change < -2.0:
                         futures_score += 2
                         futures_reasons.append(f"LS Long azalıyor (Seviye {ls_5m_curr:.2f})")
-                    # Orta seviye LS düşüşü
                     elif ls_5m_change < -2.0:
                         futures_score += 1
                         futures_reasons.append(f"LS %{ls_5m_change:.1f} (Dikkat)")
@@ -665,23 +660,27 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
             futures_reasons.append("📉 Delta Divergence")
 
     else:
-        # SPOT: Delta Divergence bonus
+        # SPOT: Delta Divergence bonus (ZORUNLU DEĞİL)
         if delta_divergence:
             futures_score += 5
             futures_reasons.append("🔥 Delta Divergence")
+        # SPOT için ekstra: Düşük fiyatlı coinler bonus
+        if close_p < 0.10:
+            futures_score += 2
+            futures_reasons.append("💎 Düşük Fiyatlı Coin")
+        # SPOT için ekstra: Son 2 mum yeşil
+        if len(closed) >= 2:
+            if float(closed[-1][4]) > float(closed[-1][1]) and float(closed[-2][4]) > float(closed[-2][1]):
+                futures_score += 2
+                futures_reasons.append("🟢 2 Mum Yeşil")
 
     # ========== GENEL SKORLAMA ==========
     score = 0
     reasons = []
 
-    # Futures puanlarını ekle
-    if is_futures:
-        score += futures_score
-        reasons.extend(futures_reasons)
-    else:
-        # Spot puanlarını ekle
-        score += futures_score
-        reasons.extend(futures_reasons)
+    # Futures/Spot puanlarını ekle
+    score += futures_score
+    reasons.extend(futures_reasons)
 
     # Ortak indikatörler (Hem spot hem futures)
     # RelVol
@@ -779,7 +778,7 @@ async def scan_coin(session, symbol, is_futures, kl_5m, kl_15m, btc_change, klin
 # =========================================================
 async def main():
     global bot_running, pending_command, consecutive_errors, recent_signal_coins, daily_tracker
-    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (LS DÜZELTİLMİŞ - SENİN GÖRDÜĞÜN YER)")
+    print("🚀 DİP DÖNÜŞÜ SİNYAL BOTU (SPOT AKTİF)")
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
         asyncio.create_task(telegram_polling(session))
