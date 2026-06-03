@@ -70,7 +70,7 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 # =========================================================
-# GEÇMİŞ VERİLERİ ÖN YÜKLEME (Preload - 0. Saniyede Hazır)
+# GEÇMİŞ VERİLERİ ÖN YÜKLEME (Preload)
 # =========================================================
 async def preload_historical_data(client, symbols):
     print("⏳ Geçmiş veriler yükleniyor...")
@@ -317,51 +317,56 @@ async def get_all_spot_symbols(client):
     return sorted(symbols)
 
 # =========================================================
-# ANA DÖNGÜ (Auto-Reconnect Özellikli)
+# ANA DÖNGÜ (Auto-Reconnect + Session Kapatma)
 # =========================================================
 async def run_bot():
     """Botun ana döngüsü - Bağlantı koparsa yeniden başlar"""
-    while True:
-        try:
-            print("🚀 Nihai Bot (Auto-Reconnect) Başlatılıyor...")
-            await send_telegram("🤖 <b>Dip Hunter Bot Yeniden Başlıyor...</b>")
-            
-            client = await AsyncClient.create()
-            
-            # 1. Adım: Tüm coinleri çek
-            all_coins = await get_all_spot_symbols(client)
-            print(f"📊 Toplam {len(all_coins)} coin taranıyor.")
-            
-            # 2. Adım: Hafızayı doldur (Eğer boşsa)
-            if len(DATA_STORE) == 0:
-                await preload_historical_data(client, all_coins)
-            
-            # 3. Adım: Tek bir Multiplex Soket oluştur
-            bm = BinanceSocketManager(client)
-            streams = [f"{sym}@kline_1m" for sym in all_coins]
-            
-            print(f"📡 {len(streams)} stream tek bir bağlantı üzerinden dinleniyor...")
-            
-            async with aiohttp.ClientSession() as session:
-                async with bm.multiplex_socket(streams) as stream:
-                    print("✅ WebSocket bağlantısı kuruldu!")
-                    await send_telegram("✅ WebSocket bağlantısı kuruldu! Sinyaller gelmeye başlayacak.")
-                    
-                    while True:
-                        try:
-                            res = await stream.recv()
-                            await handle_socket_message(res, session)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as e:
-                            print(f"Soket okuma hatası: {e}")
-                            # Hata alındı, döngü kırılacak ve yeniden bağlanacak
-                            break
-            
-        except Exception as e:
-            print(f"Bot döngüsü hatası: {e}")
-            await send_telegram(f"❌ Bağlantı koptu, 10 saniye sonra yeniden başlatılıyor...")
-            await asyncio.sleep(10)
+    client = None
+    try:
+        print("🚀 Nihai Bot (Auto-Reconnect) Başlatılıyor...")
+        await send_telegram("🤖 <b>Dip Hunter Bot Yeniden Başlıyor...</b>")
+        
+        client = await AsyncClient.create()
+        
+        # 1. Adım: Tüm coinleri çek
+        all_coins = await get_all_spot_symbols(client)
+        print(f"📊 Toplam {len(all_coins)} coin taranıyor.")
+        
+        # 2. Adım: Hafızayı doldur (Eğer boşsa)
+        if len(DATA_STORE) == 0:
+            await preload_historical_data(client, all_coins)
+        
+        # 3. Adım: Tek bir Multiplex Soket oluştur
+        bm = BinanceSocketManager(client)
+        streams = [f"{sym}@kline_1m" for sym in all_coins]
+        
+        print(f"📡 {len(streams)} stream tek bir bağlantı üzerinden dinleniyor...")
+        
+        # Her döngüde yeni bir session oluştur, döngü sonunda kapat
+        async with aiohttp.ClientSession() as session:
+            async with bm.multiplex_socket(streams) as stream:
+                print("✅ WebSocket bağlantısı kuruldu!")
+                await send_telegram("✅ WebSocket bağlantısı kuruldu! Sinyaller gelmeye başlayacak.")
+                
+                while True:
+                    try:
+                        res = await stream.recv()
+                        await handle_socket_message(res, session)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        print(f"Soket okuma hatası: {e}")
+                        # Hata alındı, döngü kırılacak ve yeniden bağlanacak
+                        break
+        
+    except Exception as e:
+        print(f"Bot döngüsü hatası: {e}")
+        await send_telegram(f"❌ Bağlantı koptu, 10 saniye sonra yeniden başlatılıyor... (Hata: {str(e)[:100]})")
+    finally:
+        # Client'i kapat
+        if client:
+            await client.close_connection()
+        print("✅ Binance client kapatıldı.")
 
 # =========================================================
 # MAIN
@@ -374,6 +379,9 @@ async def main():
             print(f"Ana hata: {e}")
             await send_telegram("❌ Kritik hata, 30 saniye sonra yeniden başlatılıyor...")
             await asyncio.sleep(30)
+        finally:
+            # Her döngüde yeni bir başlangıç için bekleyelim
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(main())
