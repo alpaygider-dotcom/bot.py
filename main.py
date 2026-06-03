@@ -3,7 +3,7 @@ import os
 import time
 import aiohttp
 from binance import AsyncClient, BinanceSocketManager
-from statistics import mean, median
+from statistics import median
 
 # =========================================================
 # AYARLAR
@@ -73,7 +73,7 @@ def calculate_rsi(prices, period=14):
 # GEÇMİŞ VERİLERİ ÖN YÜKLEME (Preload - 0. Saniyede Hazır)
 # =========================================================
 async def preload_historical_data(client, symbols):
-    print("⏳ Geçmiş veriler yükleniyor (Bu işlem 5-10 saniye sürebilir)...")
+    print("⏳ Geçmiş veriler yükleniyor...")
     semaphore = asyncio.Semaphore(10)
     
     async def fetch_history(sym):
@@ -132,10 +132,6 @@ def check_signals(symbol, data, close_price, volume, kline):
     
     # Fiyat değişimi (Son 6 mum öncesine göre)
     price_change_pct = ((close_price - prices[-6]) / prices[-6]) * 100 if len(prices) >= 6 else 0
-    
-    # RS (BTC'ye göre relatif güç)
-    # Burada btc_change alanı yok, basitleştiriyoruz
-    rs = 0  # Basit tutuyoruz, RS için ayrı bir mantık gerekir
     
     # Buy/sell ratio (Taker buy volume)
     tbuy = float(kline["t"]) if "t" in kline else 0
@@ -214,15 +210,6 @@ def check_signals(symbol, data, close_price, volume, kline):
         penalty += 3
         penalty_reasons.append("Alıcı baskısı zayıf")
     
-    # 3. RS cezası (basit)
-    if rs < -1.0:
-        penalty += 2
-        penalty_reasons.append("RS zayıf")
-    
-    # ---------- L/S ONAYI ----------
-    # (Harici olarak fetch edilecek, burada sadece placeholder)
-    ls_extra = ""
-    
     # ---------- SKOR HESAPLAMA ----------
     dip_total = dip_score - penalty
     squeeze_total = squeeze_score - penalty
@@ -237,7 +224,7 @@ def check_signals(symbol, data, close_price, volume, kline):
             "volume": volume,
             "median_vol": median_vol,
             "reasons": dip_reasons + penalty_reasons,
-            "ls_extra": ls_extra
+            "ls_extra": ""
         }
     
     # SHORT SQUEEZE SİNYALİ
@@ -250,7 +237,7 @@ def check_signals(symbol, data, close_price, volume, kline):
             "volume": volume,
             "median_vol": median_vol,
             "reasons": squeeze_reasons + penalty_reasons,
-            "ls_extra": ls_extra
+            "ls_extra": ""
         }
     
     return None
@@ -312,42 +299,9 @@ async def handle_socket_message(msg, session):
             Hacim: {signal["volume"]:,.0f} (Ortalama {signal["median_vol"]:,.0f})
             {signal["ls_extra"]}
             
-            💡 <b>Anlamı:</b> {signal["reasons"]}"""
+            💡 <b>Anlamı:</b> {' , '.join(signal['reasons'])}"""
             
             await send_telegram(message)
-
-# =========================================================
-# MAIN
-# =========================================================
-async def main():
-    print("🚀 Nihai Bot (Multiplex + Preload) Başlatılıyor...")
-    await send_telegram("🤖 <b>Dip Hunter Bot (Nihai Versiyon) Aktif!</b>")
-    
-    client = await AsyncClient.create()
-    
-    # 1. Adım: Tüm coinleri çek
-    all_coins = await get_all_spot_symbols(client)
-    print(f"📊 Toplam {len(all_coins)} coin taranıyor.")
-    
-    # 2. Adım: Hafızayı doldur (0. saniyede hazır olmak için)
-    await preload_historical_data(client, all_coins)
-    
-    # 3. Adım: Tek bir Multiplex Soket oluştur
-    bm = BinanceSocketManager(client)
-    streams = [f"{sym}@kline_1m" for sym in all_coins]
-    
-    print(f"📡 {len(streams)} stream tek bir bağlantı üzerinden dinleniyor...")
-    await send_telegram(f"📡 {len(streams)} coin dinleniyor. Sinyaller 1-2 dakika içinde gelmeye başlayacak.")
-    
-    async with aiohttp.ClientSession() as session:
-        async with bm.multiplex_socket(streams) as stream:
-            while True:
-                try:
-                    res = await stream.recv()
-                    await handle_socket_message(res, session)
-                except Exception as e:
-                    print(f"Soket hatası: {e}")
-                    await asyncio.sleep(5)
 
 # =========================================================
 # YARDIMCI FONKSİYONLAR
@@ -361,6 +315,65 @@ async def get_all_spot_symbols(client):
         if sym.endswith("USDT") and sym not in STABLECOIN_BLACKLIST and sym not in MAJOR_COINS_BLACKLIST:
             symbols.append(sym.lower())
     return sorted(symbols)
+
+# =========================================================
+# ANA DÖNGÜ (Auto-Reconnect Özellikli)
+# =========================================================
+async def run_bot():
+    """Botun ana döngüsü - Bağlantı koparsa yeniden başlar"""
+    while True:
+        try:
+            print("🚀 Nihai Bot (Auto-Reconnect) Başlatılıyor...")
+            await send_telegram("🤖 <b>Dip Hunter Bot Yeniden Başlıyor...</b>")
+            
+            client = await AsyncClient.create()
+            
+            # 1. Adım: Tüm coinleri çek
+            all_coins = await get_all_spot_symbols(client)
+            print(f"📊 Toplam {len(all_coins)} coin taranıyor.")
+            
+            # 2. Adım: Hafızayı doldur (Eğer boşsa)
+            if len(DATA_STORE) == 0:
+                await preload_historical_data(client, all_coins)
+            
+            # 3. Adım: Tek bir Multiplex Soket oluştur
+            bm = BinanceSocketManager(client)
+            streams = [f"{sym}@kline_1m" for sym in all_coins]
+            
+            print(f"📡 {len(streams)} stream tek bir bağlantı üzerinden dinleniyor...")
+            
+            async with aiohttp.ClientSession() as session:
+                async with bm.multiplex_socket(streams) as stream:
+                    print("✅ WebSocket bağlantısı kuruldu!")
+                    await send_telegram("✅ WebSocket bağlantısı kuruldu! Sinyaller gelmeye başlayacak.")
+                    
+                    while True:
+                        try:
+                            res = await stream.recv()
+                            await handle_socket_message(res, session)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            print(f"Soket okuma hatası: {e}")
+                            # Hata alındı, döngü kırılacak ve yeniden bağlanacak
+                            break
+            
+        except Exception as e:
+            print(f"Bot döngüsü hatası: {e}")
+            await send_telegram(f"❌ Bağlantı koptu, 10 saniye sonra yeniden başlatılıyor...")
+            await asyncio.sleep(10)
+
+# =========================================================
+# MAIN
+# =========================================================
+async def main():
+    while True:
+        try:
+            await run_bot()
+        except Exception as e:
+            print(f"Ana hata: {e}")
+            await send_telegram("❌ Kritik hata, 30 saniye sonra yeniden başlatılıyor...")
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
