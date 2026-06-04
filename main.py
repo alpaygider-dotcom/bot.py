@@ -1,4 +1,3 @@
-
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║   BİNANCE TR — AKILLI KRİPTO SİNYAL BOTU v2.0             ║
@@ -58,9 +57,13 @@ K1_BB_SIKISMA     = 0.06    # Bant genişliği / orta < bu = sıkışma
 K1_MIN_SKOR       = 6       # Katman 1 geçmek için min skor
 
 # Katman 2 — 1 dakika
-K2_HACIM_KATI     = 3.0     # Medyan hacmin kaç katı
-K2_TAKER_MIN      = 0.58    # Minimum taker buy oranı (%58)
-K2_MIN_SKOR       = 14      # Toplam skor (K1+K2) minimum
+K2_HACIM_KATI     = 3.0     # Medyan hacmin kaç katı (minimum)
+K2_HACIM_MAX      = 50.0    # Bu kadar üstü = ince piyasa gürültüsü, reddet
+K2_TAKER_MIN      = 0.60    # Minimum taker buy oranı (%60)
+K2_TAKER_MAX      = 0.92    # Bu kadar üstü = tek işlem spike'ı, güvenilmez
+K2_MIN_USD        = 5000    # O mumda minimum $5000 USD hacim olmalı
+K2_MIN_5DK        = 0.10    # 5dk değişim min %0.1 (fiyat kıpırdamalı)
+K2_MIN_SKOR       = 16      # Toplam skor minimum (14'ten 16'ya sıkılaştırıldı)
 
 # Pump koruması
 PUMP_SAAT         = 6       # Son kaç saat
@@ -386,10 +389,28 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     d15 = ((son_f - f[-15]) / f[-15] * 100) if len(f) >= 15 else 0
     d3  = ((son_f - f[-3])  / f[-3]  * 100) if len(f) >= 3  else 0
 
-    # Minimum koşullar
+    # ── Minimum koşullar (hard filtreler) ──────────────────────
+    # 1. Hacim çarpanı yeterli mi?
     if hacim_k < K2_HACIM_KATI: return None
-    if taker   < K2_TAKER_MIN:  return None
-    if d3      < -1.5:          return None  # Hâlâ düşüyor, henüz değil
+
+    # 2. Hacim çarpanı çok yüksek = ince piyasa gürültüsü
+    if hacim_k > K2_HACIM_MAX: return None
+
+    # 3. Taker buy yeterli mi?
+    if taker < K2_TAKER_MIN: return None
+
+    # 4. Taker buy %92+ = tek bir işlem, gerçek alış baskısı değil
+    if taker > K2_TAKER_MAX: return None
+
+    # 5. USD hacim yeterli mi? (düşük hacimli coin filtresi)
+    usd_hacim = son_h * son_f
+    if usd_hacim < K2_MIN_USD: return None
+
+    # 6. Fiyat en azından kıpırdamış mı? (%0.1)
+    if d5 < K2_MIN_5DK: return None
+
+    # 7. Hâlâ düşüyor mu?
+    if d3 < -1.5: return None
 
     # Skor — K1'den devam et
     skor     = k1["skor"]
@@ -435,19 +456,20 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     else:            guc = "⭐ ORTA";           emoji = "🔥"
 
     return {
-        "skor":    skor,
-        "guc":     guc,
-        "emoji":   emoji,
-        "fiyat":   son_f,
-        "vwap_f":  vwap_fark,
-        "hacim_k": hacim_k,
-        "taker":   taker,
-        "d5":      d5,
-        "d15":     d15,
-        "rsi":     k1["rsi"],
-        "bb":      k1["bb"],
-        "obv_div": k1["obv_div"],
-        "sebepler":sebepler,
+        "skor":     skor,
+        "guc":      guc,
+        "emoji":    emoji,
+        "fiyat":    son_f,
+        "vwap_f":   vwap_fark,
+        "hacim_k":  hacim_k,
+        "usd_hacim":usd_hacim,
+        "taker":    taker,
+        "d5":       d5,
+        "d15":      d15,
+        "rsi":      k1["rsi"],
+        "bb":       k1["bb"],
+        "obv_div":  k1["obv_div"],
+        "sebepler": sebepler,
     }
 
 
@@ -477,7 +499,7 @@ async def sinyal_gonder(sembol: str, k2: dict, ls: dict | None):
         f"  OBV: {obv_m}\n"
         f"\n"
         f"<b>⚡ 1dk:</b>\n"
-        f"  Hacim: x{k2['hacim_k']:.1f}\n"
+        f"  Hacim: x{k2['hacim_k']:.1f}  (${k2['usd_hacim']:,.0f})\n"
         f"  Alış Baskısı: %{k2['taker']*100:.0f}\n"
         f"  VWAP: {'+' if k2['vwap_f'] >= 0 else ''}{k2['vwap_f']:.2f}%\n"
         f"  5dk: {k2['d5']:+.1f}%  |  15dk: {k2['d15']:+.1f}%\n"
