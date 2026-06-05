@@ -1,18 +1,18 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   BİNANCE TR — AKILLI KRİPTO SİNYAL BOTU v2.0             ║
+║   BİNANCE TR — AKILLI KRİPTO SİNYAL BOTU v3.0             ║
 ║   3 Katmanlı Filtre | Yükselişten ÖNCE coin bul            ║
 ╚══════════════════════════════════════════════════════════════╝
 
 MİMARİ:
   Her 5 dk  → Tüm coinler 15dk REST verisiyle taranır
-  En iyi 40 → 1dk WebSocket ile gerçek zamanlı izlenir  
+  En iyi 40 → 1dk WebSocket ile gerçek zamanlı izlenir
   3 katman onayı geçerse → Telegram sinyali gönderilir
 
 KATMANLAR:
-  K1 (15dk): RSI düşük + OBV yükseliyor + Bollinger alt band
-  K2 (1dk):  Hacim patlaması + Taker buy baskısı + VWAP kırılımı
-  K3:        Pump koruması + L/S oranı yorumu
+  K1 (15dk): RSI < 38 + OBV yükseliyor + BB alt %30 bölgesi
+  K2 (1dk):  Hacim x3+ + Taker buy %60+ + VWAP filtresi
+  K3:        Pump koruması + Spam filtresi + L/S yorumu
 """
 
 import asyncio
@@ -22,10 +22,6 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 from binance import AsyncClient, BinanceSocketManager
 from statistics import median, stdev
-
-# Türkiye saati (UTC+3)
-def tr_saat():
-    return datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M:%S")
 
 # ══════════════════════════════════════════════════════════════
 # ORTAM DEĞİŞKENLERİ
@@ -37,64 +33,84 @@ if not BOT_TOKEN or not CHAT_ID:
     print("❌ BOT_TOKEN veya CHAT_ID eksik!")
     exit(1)
 
+def tr_saat() -> str:
+    """Türkiye saati (UTC+3)"""
+    return datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M:%S")
+
 # ══════════════════════════════════════════════════════════════
 # KARA LİSTELER
 # ══════════════════════════════════════════════════════════════
+
+# Stablecoin ve sabit değerli tokenlar
 STABLECOIN_LISTESI = {
     "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDTUSDT",
-    "FDUSDUSDT", "USDPUSDT", "EURUSDT", "USDPAXUSDT",
-    "SUSDUSDT", "USTUSDT", "FRAXUSDT", "LUSDUSDT",
+    "FDUSDUSDT", "USDPUSDT", "EURUSDT", "USDPAXUSDT", "SUSDUSDT",
+    "USTUSDT", "FRAXUSDT", "LUSDUSDT", "AEURUSDT", "GBPUSDT",
 }
+
+# Ana coinler — farklı dinamikler, bu bot için uygun değil
 MAJOR_LISTESI = {
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "BCHUSDT", "LTCUSDT", "LINKUSDT", "DOTUSDT", "ADAUSDT",
+    "AVAXUSDT", "MATICUSDT", "TRXUSDT", "ATOMUSDT", "NEARUSDT",
+}
+
+# Ölü / güvenilmez / manipülasyona açık coinler
+OLU_LISTESI = {
+    "LUNCUSDT", "USTCUSDT", "MOONUSDT", "SAFEMOONUSDT",
+    "SHIBUSDT",  # Çok ince piyasa, tek işlem hacmi patlatıyor
+    "PEPEUSDT",  # Meme coin, manipülasyon riski
+    "1MBABYDOGEUSDT", "BABYDOGEUSDT",
 }
 
 # ══════════════════════════════════════════════════════════════
-# PARAMETRELER
+# PARAMETRELER — Dengeli ayar
 # ══════════════════════════════════════════════════════════════
-# Katman 1 — 15 dakika
-K1_RSI_MIN        = 15      # Bu altı = serbest düşüş, atla
-K1_RSI_MAX        = 40      # RSI bu altında olmalı (38'den 40'a gevşetildi)
-K1_OBV_PERIYOT    = 10      # OBV trendi için kaç mum
-K1_BB_PERIYOT     = 20      # Bollinger bant mum sayısı
-K1_BB_STD         = 2.0     # Bollinger standart sapma
-K1_BB_SIKISMA     = 0.06    # Bant genişliği / orta < bu = sıkışma
-K1_MIN_SKOR       = 5       # Katman 1 geçmek için min skor (6'dan 5'e)
 
-# Katman 2 — 1 dakika
-K2_HACIM_KATI     = 3.0     # Medyan hacmin kaç katı (minimum)
-K2_HACIM_MAX      = 50.0    # Bu kadar üstü = ince piyasa gürültüsü, reddet
-K2_TAKER_MIN      = 0.58    # Minimum taker buy oranı (%60'dan %58'e gevşetildi)
-K2_TAKER_MAX      = 0.92    # Bu kadar üstü = tek işlem spike'ı, güvenilmez
-K2_MIN_USD        = 3000    # Minimum USD hacim ($5000'dan $3000'e gevşetildi)
-K2_MIN_5DK        = 0.05    # 5dk değişim min %0.05 (%0.1'den gevşetildi)
-K2_MIN_SKOR       = 14      # Toplam skor minimum (16'dan 14'e gevşetildi)
+# ── Katman 1 (15dk) ─────────────────────────────────────────
+K1_RSI_MIN      = 15    # Altı = serbest düşüş, atla
+K1_RSI_MAX      = 38    # Üstü = gerçek dip değil (39-40 filtresi)
+K1_OBV_PERIYOT  = 10    # OBV trend hesabı için kaç mum
+K1_BB_PERIYOT   = 20    # Bollinger bant periyodu
+K1_BB_STD       = 2.0   # Bollinger standart sapma çarpanı
+K1_BB_SIKISMA   = 0.06  # Bant dar ise volatilite bekleniyor
+K1_BB_MAX       = 0.30  # BB pozisyonu bu üstü = dip değil, HARD REDDET
+K1_MIN_SKOR     = 6     # K1 geçmek için minimum skor
 
-# Pump koruması
-PUMP_SAAT         = 6       # Son kaç saat
-PUMP_PCT          = 15.0    # Bu kadar çıkmışsa sinyal verme
+# ── Katman 2 (1dk) ──────────────────────────────────────────
+K2_HACIM_MIN    = 3.0   # Medyan hacmin minimum kaç katı
+K2_HACIM_MAX    = 50.0  # Üstü = ince piyasa gürültüsü
+K2_TAKER_MIN    = 0.60  # Minimum taker buy oranı (%60)
+K2_TAKER_MAX    = 0.92  # Üstü = tek işlem spike'ı, güvenilmez
+K2_USD_MIN      = 5000  # Minimum USD hacim (o mumda)
+K2_5DK_MIN      = 0.05  # 5dk minimum fiyat hareketi %
+K2_VWAP_MIN     = -0.80 # VWAP'ın bu kadar altında olanı reddet
+K2_MIN_SKOR     = 15    # Toplam minimum skor (K1 + K2)
 
-# Sistem
-SINYAL_BEKLEME    = 1800    # Aynı coin tekrar sinyal için min saniye (30dk)
-MIN_15DK_MUM      = 50      # Analiz için min 15dk mum
-MIN_1DK_MUM       = 30      # Analiz için min 1dk mum
-TARAMA_SURE       = 300     # Tarama aralığı saniye (5dk)
-MAX_IZLEME        = 40      # Aynı anda max izlenen coin
+# ── Koruma ──────────────────────────────────────────────────
+PUMP_SAAT       = 6     # Pump koruması: son kaç saat
+PUMP_PCT        = 15.0  # Bu kadar çıkmışsa sinyal verme
+
+# ── Sistem ──────────────────────────────────────────────────
+SINYAL_BEKLEME  = 1800  # Aynı coin için min sinyal arası (30dk)
+MIN_15DK_MUM    = 50    # Analiz için min 15dk mum sayısı
+MIN_1DK_MUM     = 30    # Analiz için min 1dk mum sayısı
+TARAMA_SURE     = 300   # 15dk tarama aralığı (5dk)
+MAX_IZLEME      = 40    # Aynı anda max izlenen coin
+
+# ── Spam Koruması ───────────────────────────────────────────
+SPAM_PENCERE    = 300   # 5 dakika
+SPAM_ESIK       = 5     # 5dk içinde max sinyal sayısı
 
 # ══════════════════════════════════════════════════════════════
-# GLOBAL VERİ DEPOLARI
+# GLOBAL DEPOLAR
 # ══════════════════════════════════════════════════════════════
-STORE_15DK      = {}   # 15dk mum verileri (tüm coinler)
-STORE_1DK       = {}   # 1dk mum verileri (sadece izlenenler)
-IZLENEN         = set() # Şu an izlenen coinler
-SINYAL_ZAMANI   = {}   # Son sinyal zamanları
-WS_YENILE       = False # WebSocket yenileme bayrağı
-
-# Piyasa geneli spam koruması
-# Kısa sürede çok fazla sinyal = Bitcoin hareketi, gerçek sinyal değil
-SON_SINYALLER   = []   # (zaman, sembol) listesi
-SPAM_PENCERE    = 300  # 5 dakika
-SPAM_ESIK       = 5    # 5 dakikada max 5 sinyal (3'ten 5'e gevşetildi)
+STORE_15DK    = {}      # 15dk mum verileri
+STORE_1DK     = {}      # 1dk mum verileri (sadece izlenenler)
+IZLENEN       = set()   # Şu an izlenen coinler
+SINYAL_ZAMANI = {}      # Son sinyal zamanları {sembol: timestamp}
+SON_SINYALLER = []      # Spam koruması için [(timestamp, sembol)]
+WS_YENILE     = False   # WebSocket yenileme bayrağı
 
 # ══════════════════════════════════════════════════════════════
 # TELEGRAM
@@ -115,7 +131,7 @@ async def telegram(mesaj: str):
 # ══════════════════════════════════════════════════════════════
 
 def rsi(fiyatlar: list, n: int = 14) -> float:
-    """Wilder RSI"""
+    """Wilder RSI hesapla"""
     if len(fiyatlar) < n + 1:
         return 50.0
     g, k = [], []
@@ -143,7 +159,11 @@ def ema(fiyatlar: list, n: int) -> float:
 
 
 def bollinger(fiyatlar: list, n: int = 20, std_k: float = 2.0) -> dict:
-    """Bollinger Bantları"""
+    """
+    Bollinger Bantları
+    yuzde_b: 0 = alt bant, 1 = üst bant, 0.5 = orta
+    genislik: bantların ne kadar açık olduğu
+    """
     if len(fiyatlar) < n:
         f = fiyatlar[-1] if fiyatlar else 0
         return {"ust": f, "orta": f, "alt": f, "genislik": 0.0, "yuzde_b": 0.5}
@@ -159,13 +179,12 @@ def bollinger(fiyatlar: list, n: int = 20, std_k: float = 2.0) -> dict:
 
 def obv_analiz(fiyatlar: list, hacimler: list, n: int = 10) -> tuple:
     """
-    OBV hesapla + trend + divergence kontrol
+    OBV trendi + Bullish Divergence
+    Divergence: Fiyat düşüyor ama OBV yükseliyor = gizli birikim
     Döner: (yukseliyor, divergence, aciklama)
     """
     if len(fiyatlar) < n + 1 or len(fiyatlar) != len(hacimler):
         return False, False, ""
-
-    # OBV listesi
     obv = [0.0]
     for i in range(1, len(fiyatlar)):
         if fiyatlar[i] > fiyatlar[i-1]:
@@ -174,17 +193,12 @@ def obv_analiz(fiyatlar: list, hacimler: list, n: int = 10) -> tuple:
             obv.append(obv[-1] - hacimler[i])
         else:
             obv.append(obv[-1])
-
-    son_obv     = obv[-n:]
-    obv_trend   = (son_obv[-1] - son_obv[0]) / max(abs(son_obv[0]), 1) * 100
+    obv_trend   = (obv[-1] - obv[-n]) / max(abs(obv[-n]), 1) * 100
     fiyat_trend = (fiyatlar[-1] - fiyatlar[-n]) / fiyatlar[-n] * 100
-
     yukseliyor  = obv_trend > 2.0
-    # Bullish divergence: fiyat aşağı OBV yukarı = gizli birikim
     divergence  = fiyat_trend < -1.0 and obv_trend > 1.0
-
     if divergence:
-        return True, True, f"🔍 Gizli Birikim! (OBV {obv_trend:+.1f}%)"
+        return True, True,  f"🔍 Gizli Birikim (OBV {obv_trend:+.1f}%)"
     elif yukseliyor:
         return True, False, f"📈 OBV Yükseliyor ({obv_trend:+.1f}%)"
     else:
@@ -192,7 +206,10 @@ def obv_analiz(fiyatlar: list, hacimler: list, n: int = 10) -> tuple:
 
 
 def vwap(yuksekler, dusukler, kapanis, hacimler) -> float:
-    """VWAP — kurumsal alıcıların referans fiyatı"""
+    """
+    VWAP — kurumsal alıcıların referans fiyatı.
+    Fiyat VWAP'ı kırarsa güçlü sinyal.
+    """
     if not hacimler:
         return kapanis[-1] if kapanis else 0.0
     pv = sum(((y+d+k)/3) * h for y, d, k, h in zip(yuksekler, dusukler, kapanis, hacimler))
@@ -200,21 +217,26 @@ def vwap(yuksekler, dusukler, kapanis, hacimler) -> float:
     return pv / v if v > 0 else (kapanis[-1] if kapanis else 0.0)
 
 
-def pump_var_mi(fiyatlar: list, saat: int = 6) -> tuple:
-    """Son N saatte pump kontrol (15dk mumlar: 1 saat = 4 mum)"""
-    n = saat * 4
+def pump_var_mi(fiyatlar: list) -> tuple:
+    """
+    Son PUMP_SAAT saatte aşırı yükseliş var mı?
+    15dk mumlar: 1 saat = 4 mum
+    """
+    n = PUMP_SAAT * 4
     if len(fiyatlar) < n:
         return False, 0.0
     en_dusuk = min(fiyatlar[-n:])
     pct      = ((fiyatlar[-1] - en_dusuk) / en_dusuk * 100) if en_dusuk > 0 else 0
     return pct >= PUMP_PCT, round(pct, 1)
 
-
 # ══════════════════════════════════════════════════════════════
 # LONG/SHORT ORANI
 # ══════════════════════════════════════════════════════════════
 async def ls_cek(session: aiohttp.ClientSession, sembol: str) -> dict | None:
-    """Futures L/S oranı — yoksa None döner, sinyal yine gelir"""
+    """
+    Futures L/S oranı çek.
+    Spot coinin futures'ı yoksa None döner — sinyal yine gelir.
+    """
     try:
         url = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
         p   = {"symbol": sembol.upper(), "period": "5m", "limit": 3}
@@ -235,6 +257,7 @@ async def ls_cek(session: aiohttp.ClientSession, sembol: str) -> dict | None:
 
 
 def ls_yorum(ls: dict | None) -> str:
+    """L/S yorumu — boş string döner yoksa"""
     if not ls:
         return ""
     s = ls["s"] * 100
@@ -243,18 +266,18 @@ def ls_yorum(ls: dict | None) -> str:
     if s > 55 and d < -1.5:
         return f"🟢 Short'lar kapanıyor! (%{s:.0f} short, azalıyor) → Squeeze yakın"
     if s > 55:
-        return f"🟡 Short ağırlıklı piyasa (%{s:.0f}) → Dönüş ihtimali yüksek"
+        return f"🟡 Short ağırlıklı (%{s:.0f}) → Dönüş ihtimali var"
     if l > 60 and d < -3.0:
         return f"🟢 Long panik satışı (%{l:.0f}) → Dip tükenme sinyali"
     if 45 < s < 55:
         return f"⚪ Dengeli L/S (%{l:.0f}L / %{s:.0f}S)"
     return ""
 
-
 # ══════════════════════════════════════════════════════════════
-# BİNANCE TR — SEMBOL LİSTESİ
+# SEMBOL LİSTESİ
 # ══════════════════════════════════════════════════════════════
 async def sembolleri_cek(client: AsyncClient) -> list:
+    """Binance TR'deki aktif USDT çiftlerini çek, kara listeleri uygula"""
     try:
         veri = await client.get_exchange_info()
         return sorted([
@@ -264,11 +287,11 @@ async def sembolleri_cek(client: AsyncClient) -> list:
             and s.get("status") == "TRADING"
             and s["symbol"] not in STABLECOIN_LISTESI
             and s["symbol"] not in MAJOR_LISTESI
+            and s["symbol"] not in OLU_LISTESI
         ])
     except Exception as e:
         print(f"[Sembol Hata] {e}")
         return []
-
 
 # ══════════════════════════════════════════════════════════════
 # VERİ ÇEKME
@@ -293,20 +316,23 @@ async def cek_1dk(client: AsyncClient, sembol: str):
     try:
         klines = await client.get_klines(symbol=sembol.upper(), interval="1m", limit=80)
         STORE_1DK[sembol] = {
-            "f":  [float(k[4]) for k in klines[:-1]],
-            "y":  [float(k[2]) for k in klines[:-1]],
-            "d":  [float(k[3]) for k in klines[:-1]],
-            "h":  [float(k[5]) for k in klines[:-1]],
-            "tb": [float(k[9]) for k in klines[:-1]],  # taker buy volume
+            "f":  [float(k[4]) for k in klines[:-1]],  # kapanis
+            "y":  [float(k[2]) for k in klines[:-1]],  # yuksek
+            "d":  [float(k[3]) for k in klines[:-1]],  # dusuk
+            "h":  [float(k[5]) for k in klines[:-1]],  # hacim
+            "tb": [float(k[9]) for k in klines[:-1]],  # taker buy volume ✅
         }
     except:
         pass
-
 
 # ══════════════════════════════════════════════════════════════
 # KATMAN 1 — 15 DAKİKALIK ANALİZ
 # ══════════════════════════════════════════════════════════════
 def katman1(sembol: str) -> dict | None:
+    """
+    15dk verileriyle ön tarama.
+    Geçmesi için: RSI < 38, OBV yükseliyor, BB alt %30 bölgesi
+    """
     if sembol not in STORE_15DK:
         return None
     d = STORE_15DK[sembol]
@@ -315,44 +341,54 @@ def katman1(sembol: str) -> dict | None:
     if len(f) < MIN_15DK_MUM:
         return None
 
-    # Pump koruması — en önce kontrol et
-    pump, pump_pct = pump_var_mi(f, PUMP_SAAT)
+    # ── Pump koruması ────────────────────────────────────────
+    pump, pump_pct = pump_var_mi(f)
     if pump:
         return None
 
-    r   = rsi(f)
-    bb  = bollinger(f, K1_BB_PERIYOT, K1_BB_STD)
+    # ── Temel hesaplamalar ───────────────────────────────────
+    r  = rsi(f)
+    bb = bollinger(f, K1_BB_PERIYOT, K1_BB_STD)
     obv_yukseliyor, obv_div, obv_acik = obv_analiz(f, h, K1_OBV_PERIYOT)
 
-    # RSI aralık filtresi
+    # ── HARD FİLTRELER (skor hesabı yok, direkt reddet) ─────
+
+    # RSI aralık dışı
     if not (K1_RSI_MIN <= r <= K1_RSI_MAX):
         return None
 
-    # OBV şartı — en az biri olmalı
+    # BB pozisyonu çok yukarıda = dip değil
+    # Divergence istisnası: fiyat düşerken OBV yükseliyorsa BB biraz yukarıda olabilir
+    if bb["yuzde_b"] > K1_BB_MAX and not obv_div:
+        return None
+
+    # OBV şartı — yükselmeli ya da divergence olmalı
     if not obv_yukseliyor and not obv_div:
         return None
 
+    # ── SKOR HESABI ─────────────────────────────────────────
     skor = 0
     sebepler = []
 
-    # RSI
-    if r < 25:   skor += 4; sebepler.append(f"RSI {r} 🔴")
-    elif r < 30: skor += 3; sebepler.append(f"RSI {r}")
-    elif r < 35: skor += 2; sebepler.append(f"RSI {r}")
-    else:        skor += 1; sebepler.append(f"RSI {r}")
+    # RSI skoru
+    if   r < 25: skor += 4; sebepler.append(f"RSI {r:.1f} 🔴")
+    elif r < 30: skor += 3; sebepler.append(f"RSI {r:.1f}")
+    elif r < 35: skor += 2; sebepler.append(f"RSI {r:.1f}")
+    else:        skor += 1; sebepler.append(f"RSI {r:.1f}")
 
-    # OBV
-    if obv_div:          skor += 4; sebepler.append(obv_acik)
-    elif obv_yukseliyor: skor += 2; sebepler.append(obv_acik)
+    # OBV skoru
+    if   obv_div:          skor += 4; sebepler.append(obv_acik)
+    elif obv_yukseliyor:   skor += 2; sebepler.append(obv_acik)
 
-    # Bollinger
+    # Bollinger skoru
     if   bb["yuzde_b"] <= 0.05: skor += 4; sebepler.append("BB alt bandına değdi 🎯")
     elif bb["yuzde_b"] <= 0.15: skor += 3; sebepler.append("BB alt bandına yakın")
-    elif bb["yuzde_b"] <= 0.25: skor += 1; sebepler.append("BB alt çeyreği")
+    elif bb["yuzde_b"] <= 0.25: skor += 2; sebepler.append("BB alt çeyreği")
+    elif bb["yuzde_b"] <= 0.30: skor += 1; sebepler.append("BB alt bölgesi")
 
-    # BB sıkışması
+    # BB sıkışması — tek başına yetmez, destek puan
     if bb["genislik"] < K1_BB_SIKISMA:
-        skor += 2; sebepler.append("BB Sıkışması ⚡")
+        skor += 1; sebepler.append("BB Sıkışması ⚡")
 
     if skor < K1_MIN_SKOR:
         return None
@@ -367,11 +403,14 @@ def katman1(sembol: str) -> dict | None:
         "ema50":   ema(f, 50) if len(f) >= 50 else None,
     }
 
-
 # ══════════════════════════════════════════════════════════════
 # KATMAN 2 — 1 DAKİKALIK ANALİZ
 # ══════════════════════════════════════════════════════════════
 def katman2(sembol: str, k1: dict) -> dict | None:
+    """
+    1dk verisiyle giriş zamanlaması.
+    Geçmesi için: Hacim x3+, Taker %60+, VWAP filtresi, fiyat kıpırdıyor
+    """
     if sembol not in STORE_1DK:
         return None
     d = STORE_1DK[sembol]
@@ -384,46 +423,31 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     son_h  = h[-1]
     son_tb = tb[-1]
 
-    # Hacim bazı ve çarpan
     baz_h    = median(h[-50:]) if len(h) >= 50 else median(h)
     hacim_k  = son_h / baz_h if baz_h > 0 else 1.0
-
-    # Taker buy oranı — gerçek alış baskısı
     taker    = son_tb / son_h if son_h > 0 else 0.5
+    usd_hacim = son_h * son_f
 
-    # VWAP (son 30 mum)
-    vw       = vwap(y[-30:], dd[-30:], f[-30:], h[-30:])
+    # VWAP — son 30 mum
+    vw        = vwap(y[-30:], dd[-30:], f[-30:], h[-30:])
     vwap_fark = ((son_f - vw) / vw * 100) if vw > 0 else 0
 
-    # Değişimler
+    # Fiyat değişimleri
+    d3  = ((son_f - f[-3])  / f[-3]  * 100) if len(f) >= 3  else 0
     d5  = ((son_f - f[-5])  / f[-5]  * 100) if len(f) >= 5  else 0
     d15 = ((son_f - f[-15]) / f[-15] * 100) if len(f) >= 15 else 0
-    d3  = ((son_f - f[-3])  / f[-3]  * 100) if len(f) >= 3  else 0
 
-    # ── Minimum koşullar (hard filtreler) ──────────────────────
-    # 1. Hacim çarpanı yeterli mi?
-    if hacim_k < K2_HACIM_KATI: return None
+    # ── HARD FİLTRELER ───────────────────────────────────────
+    if hacim_k  < K2_HACIM_MIN:  return None  # Yeterli hacim yok
+    if hacim_k  > K2_HACIM_MAX:  return None  # Gürültü spike
+    if taker    < K2_TAKER_MIN:  return None  # Alıcı baskısı yok
+    if taker    > K2_TAKER_MAX:  return None  # Tek işlem spike
+    if usd_hacim < K2_USD_MIN:   return None  # USD hacim çok düşük
+    if d5       < K2_5DK_MIN:    return None  # Fiyat kıpırdamıyor
+    if d3       < -1.5:          return None  # Hâlâ düşüyor
+    if vwap_fark < K2_VWAP_MIN:  return None  # VWAP'tan çok uzak
 
-    # 2. Hacim çarpanı çok yüksek = ince piyasa gürültüsü
-    if hacim_k > K2_HACIM_MAX: return None
-
-    # 3. Taker buy yeterli mi?
-    if taker < K2_TAKER_MIN: return None
-
-    # 4. Taker buy %92+ = tek bir işlem, gerçek alış baskısı değil
-    if taker > K2_TAKER_MAX: return None
-
-    # 5. USD hacim yeterli mi? (düşük hacimli coin filtresi)
-    usd_hacim = son_h * son_f
-    if usd_hacim < K2_MIN_USD: return None
-
-    # 6. Fiyat en azından kıpırdamış mı? (%0.1)
-    if d5 < K2_MIN_5DK: return None
-
-    # 7. Hâlâ düşüyor mu?
-    if d3 < -1.5: return None
-
-    # Skor — K1'den devam et
+    # ── SKOR HESABI (K1 skorundan devam) ────────────────────
     skor     = k1["skor"]
     sebepler = list(k1["sebepler"])
 
@@ -434,29 +458,27 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     else:              skor += 2; sebepler.append(f"Hacim x{hacim_k:.1f}")
 
     # Taker buy skoru
-    if   taker >= 0.72: skor += 4; sebepler.append(f"Alış %{taker*100:.0f} 🔥🔥")
-    elif taker >= 0.65: skor += 3; sebepler.append(f"Alış %{taker*100:.0f} 🔥")
-    elif taker >= 0.58: skor += 2; sebepler.append(f"Alış %{taker*100:.0f}")
+    if   taker >= 0.75: skor += 4; sebepler.append(f"Alış %{taker*100:.0f} 🔥🔥")
+    elif taker >= 0.68: skor += 3; sebepler.append(f"Alış %{taker*100:.0f} 🔥")
+    elif taker >= 0.60: skor += 2; sebepler.append(f"Alış %{taker*100:.0f}")
 
-    # VWAP skoru — fiyat VWAP'ın çok altındaysa reddet
-    if vwap_fark < -0.80: return None   # -%0.8 altı = momentum yok (-0.5'ten gevşetildi)
+    # VWAP skoru
+    if   vwap_fark >= 0.5:  skor += 3; sebepler.append(f"VWAP kırıldı +%{vwap_fark:.2f} ✅")
+    elif vwap_fark >= -0.2: skor += 2; sebepler.append(f"VWAP yakın %{vwap_fark:.2f}")
+    elif vwap_fark >= -0.8: skor += 1
 
-    if   vwap_fark >= 0.5:  skor += 3; sebepler.append(f"VWAP kırıldı (+%{vwap_fark:.2f}) ✅")
-    elif vwap_fark >= -0.2: skor += 2; sebepler.append(f"VWAP yakın (%{vwap_fark:.2f})")
-    elif vwap_fark >= -0.5: skor += 1
-
-    # 5dk ivme
+    # 5dk ivme skoru
     if   d5 >= 2.0: skor += 3; sebepler.append(f"5dk ivme %{d5:+.1f} ⚡")
     elif d5 >= 1.0: skor += 2; sebepler.append(f"5dk ivme %{d5:+.1f}")
-    elif d5 >= 0:   skor += 1
+    elif d5 >= 0.1: skor += 1
 
     # EMA pozisyonu
     if k1["ema50"] and son_f > k1["ema50"]:
-        skor += 2; sebepler.append("EMA50 üstünde 💪")
+        skor += 2; sebepler.append("EMA50 üstü 💪")
     elif son_f > k1["ema21"]:
-        skor += 1; sebepler.append("EMA21 üstünde")
+        skor += 1; sebepler.append("EMA21 üstü")
 
-    # OBV divergence bonusu (zaten sebeplerde var, sadece skor)
+    # OBV Divergence bonus
     if k1["obv_div"]:
         skor += 2
 
@@ -475,7 +497,7 @@ def katman2(sembol: str, k1: dict) -> dict | None:
         "fiyat":    son_f,
         "vwap_f":   vwap_fark,
         "hacim_k":  hacim_k,
-        "usd_hacim":usd_hacim,
+        "usd":      usd_hacim,
         "taker":    taker,
         "d5":       d5,
         "d15":      d15,
@@ -485,7 +507,6 @@ def katman2(sembol: str, k1: dict) -> dict | None:
         "sebepler": sebepler,
     }
 
-
 # ══════════════════════════════════════════════════════════════
 # SİNYAL MESAJI
 # ══════════════════════════════════════════════════════════════
@@ -493,11 +514,13 @@ async def sinyal_gonder(sembol: str, k2: dict, ls: dict | None):
     bb   = k2["bb"]
     ls_m = ls_yorum(ls)
 
+    # BB durum metni
     if   bb["yuzde_b"] <= 0.05: bb_m = "Alt banda değdi 🎯"
-    elif bb["yuzde_b"] <= 0.20: bb_m = f"Alt banda yakın (%{bb['yuzde_b']*100:.0f})"
-    else:                        bb_m = f"Bant pozisyonu %{bb['yuzde_b']*100:.0f}"
+    elif bb["yuzde_b"] <= 0.15: bb_m = f"Alt banda yakın (%{bb['yuzde_b']*100:.0f})"
+    elif bb["yuzde_b"] <= 0.25: bb_m = f"Alt çeyrek (%{bb['yuzde_b']*100:.0f})"
+    else:                        bb_m = f"Alt bölge (%{bb['yuzde_b']*100:.0f})"
 
-    obv_m = "🔍 Gizli Birikim (Divergence!)" if k2["obv_div"] else "📈 OBV Yükseliyor"
+    obv_m = "🔍 Gizli Birikim!" if k2["obv_div"] else "📈 OBV Yükseliyor"
 
     msg = (
         f"<b>🎯 BİRİKİM + KIRILIM</b>  {k2['emoji']}\n"
@@ -506,13 +529,13 @@ async def sinyal_gonder(sembol: str, k2: dict, ls: dict | None):
         f"💰 Fiyat: <b>{k2['fiyat']:.6f}</b>\n"
         f"📊 Güç: <b>{k2['skor']}</b> puan — {k2['guc']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>📉 15dk:</b>\n"
+        f"<b>📉 15dk Analiz:</b>\n"
         f"  RSI: {k2['rsi']:.1f}\n"
         f"  Bollinger: {bb_m}\n"
         f"  OBV: {obv_m}\n"
         f"\n"
-        f"<b>⚡ 1dk:</b>\n"
-        f"  Hacim: x{k2['hacim_k']:.1f}  (${k2['usd_hacim']:,.0f})\n"
+        f"<b>⚡ 1dk Analiz:</b>\n"
+        f"  Hacim: x{k2['hacim_k']:.1f}  (${k2['usd']:,.0f})\n"
         f"  Alış Baskısı: %{k2['taker']*100:.0f}\n"
         f"  VWAP: {'+' if k2['vwap_f'] >= 0 else ''}{k2['vwap_f']:.2f}%\n"
         f"  5dk: {k2['d5']:+.1f}%  |  15dk: {k2['d15']:+.1f}%\n"
@@ -531,9 +554,8 @@ async def sinyal_gonder(sembol: str, k2: dict, ls: dict | None):
     await telegram(msg)
     print(f"✅ SİNYAL → {sembol.upper()} | {k2['skor']} puan | {k2['guc']}")
 
-
 # ══════════════════════════════════════════════════════════════
-# TARAMA GÖREVİ — Her 5 dakikada çalışır (REST API)
+# TARAMA GÖREVİ — Her 5 dakikada (REST API)
 # ══════════════════════════════════════════════════════════════
 async def tarama(client: AsyncClient):
     global IZLENEN, WS_YENILE
@@ -553,13 +575,14 @@ async def tarama(client: AsyncClient):
 
     await asyncio.gather(*[cek(s) for s in tum])
 
-    # Katman 1 analiz
+    # Katman 1 analiz — adayları bul
     adaylar = []
     for sym in tum:
         sonuc = katman1(sym)
         if sonuc:
             adaylar.append((sym, sonuc))
 
+    # En yüksek skorlulardan MAX_IZLEME kadar al
     adaylar.sort(key=lambda x: x[1]["skor"], reverse=True)
     yeni = {s for s, _ in adaylar[:MAX_IZLEME]}
 
@@ -571,19 +594,17 @@ async def tarama(client: AsyncClient):
             async with sem2:
                 await cek_1dk(client, sym)
         await asyncio.gather(*[yukle(s) for s in yeni_eklenen])
-        print(f"[Tarama] {len(yeni)} aday | +{len(yeni_eklenen)} yeni izlemeye alındı")
+        print(f"[Tarama] {len(yeni)} aday | +{len(yeni_eklenen)} yeni")
 
     # Listeden çıkanları temizle
-    cikan = IZLENEN - yeni
-    for sym in cikan:
+    for sym in (IZLENEN - yeni):
         STORE_1DK.pop(sym, None)
 
-    IZLENEN = yeni
-
-    # İzleme listesi değiştiyse WebSocket yenile
-    if yeni_eklenen or cikan:
+    # Yenileme gerekiyor mu?
+    if yeni_eklenen or (IZLENEN - yeni):
         WS_YENILE = True
 
+    IZLENEN = yeni
 
 # ══════════════════════════════════════════════════════════════
 # WEBSOCKET MESAJ İŞLEME
@@ -594,7 +615,7 @@ async def isle(msg: dict, session: aiohttp.ClientSession):
     k      = msg["data"]["k"]
     sembol = msg["data"]["s"].lower()
 
-    # Sadece izlenen coinlerin kapanan mumları
+    # Sadece izlenen coinlerin KAPANAN mumları
     if sembol not in IZLENEN or not k["x"]:
         return
 
@@ -602,55 +623,51 @@ async def isle(msg: dict, session: aiohttp.ClientSession):
     yuksek    = float(k["h"])
     dusuk     = float(k["l"])
     hacim     = float(k["v"])
-    taker_buy = float(k["V"])  # ✅ Gerçek taker buy (k["t"] değil!)
+    taker_buy = float(k["V"])  # ✅ Doğru alan (k["t"] timestamp'tir!)
 
     if sembol not in STORE_1DK:
         return
 
-    # Veriyi güncelle
+    # 1dk veriyi güncelle
     d = STORE_1DK[sembol]
-    ekle = [("f", kapanis), ("y", yuksek), ("d", dusuk), ("h", hacim), ("tb", taker_buy)]
-    for anahtar, deger in ekle:
+    for anahtar, deger in [("f", kapanis), ("y", yuksek), ("d", dusuk),
+                            ("h", hacim), ("tb", taker_buy)]:
         d[anahtar].append(deger)
         if len(d[anahtar]) > 150:
             d[anahtar].pop(0)
 
-    # Cooldown kontrolü
+    # ── Cooldown: aynı coin 30dk içinde tekrar sinyal vermez ─
     if time.time() - SINYAL_ZAMANI.get(sembol, 0) < SINYAL_BEKLEME:
         return
 
-    # Katman 1
+    # ── Katman 1 analizi ─────────────────────────────────────
     k1 = katman1(sembol)
     if not k1:
         return
 
-    # Katman 2
+    # ── Katman 2 analizi ─────────────────────────────────────
     k2 = katman2(sembol, k1)
     if not k2:
         return
 
-    # Sinyal onaylandı — cooldown başlat
+    # ── Sinyal onaylandı ─────────────────────────────────────
     SINYAL_ZAMANI[sembol] = time.time()
 
-    # ── Piyasa geneli spam koruması ──────────────────────────────
-    # 5 dakikada 3'ten fazla sinyal = Bitcoin hareketi yansıması
-    # Bu durumda sinyali gönderme, sadece logla
+    # ── Spam koruması: 5dk içinde max 5 sinyal ───────────────
+    # Çok fazla sinyal = Bitcoin hareketi yansıması, gürültü
     simdi = time.time()
     SON_SINYALLER.append((simdi, sembol))
-    # 5 dakika dışını temizle
     SON_SINYALLER[:] = [(t, s) for t, s in SON_SINYALLER if simdi - t < SPAM_PENCERE]
 
     if len(SON_SINYALLER) > SPAM_ESIK:
-        print(f"[Spam Filtre] {sembol.upper()} sinyali tutuldu "
-              f"({len(SON_SINYALLER)} sinyal / 5dk — piyasa geneli hareket)")
+        print(f"[Spam] {sembol.upper()} tutuldu ({len(SON_SINYALLER)} sinyal/5dk)")
         return
 
-    # L/S oranı çek
+    # ── L/S oranı çek ────────────────────────────────────────
     ls = await ls_cek(session, sembol)
 
-    # Gönder
+    # ── Gönder ───────────────────────────────────────────────
     await sinyal_gonder(sembol, k2, ls)
-
 
 # ══════════════════════════════════════════════════════════════
 # ANA BOT DÖNGÜSÜ
@@ -668,11 +685,11 @@ async def bot():
     client = await AsyncClient.create()
 
     try:
-        # İlk tarama
+        # ── İlk tarama ───────────────────────────────────────
         await tarama(client)
 
-        # Periyodik tarama görevi (arka planda, Telegram'a mesaj atmaz)
-        async def arka_plan_tarama():
+        # ── Arka planda periyodik tarama ─────────────────────
+        async def arka_plan():
             while True:
                 await asyncio.sleep(TARAMA_SURE)
                 try:
@@ -680,37 +697,33 @@ async def bot():
                 except Exception as e:
                     print(f"[Tarama Hata] {e}")
 
-        asyncio.create_task(arka_plan_tarama())
+        asyncio.create_task(arka_plan())
 
         bm = BinanceSocketManager(client)
 
         async with aiohttp.ClientSession() as session:
             while True:
-                # İzlenen coin yoksa bekle
                 if not IZLENEN:
                     print("İzlenecek coin yok, 30sn bekleniyor...")
                     await asyncio.sleep(30)
                     continue
 
-                izlenen_liste = list(IZLENEN)
-                streams = [f"{s}@kline_1m" for s in izlenen_liste]
+                streams = [f"{s}@kline_1m" for s in list(IZLENEN)]
                 print(f"📡 WebSocket: {len(streams)} coin izleniyor")
-
-                # ⚠️ Sadece ilk başlangıçta Telegram'a mesaj at
-                # (her WebSocket yenilenmesinde değil)
-
                 WS_YENILE = False
 
                 try:
                     async with bm.multiplex_socket(streams) as stream:
                         while True:
                             try:
-                                res = await asyncio.wait_for(stream.recv(), timeout=45)
+                                res = await asyncio.wait_for(
+                                    stream.recv(), timeout=45
+                                )
                                 await isle(res, session)
 
-                                # İzleme listesi değiştiyse WebSocket'i sessizce yenile
+                                # İzleme listesi değiştiyse sessizce yenile
                                 if WS_YENILE:
-                                    print("📡 İzleme listesi güncellendi, WebSocket yenileniyor...")
+                                    print("📡 İzleme listesi güncellendi, yenileniyor...")
                                     break
 
                             except asyncio.TimeoutError:
@@ -729,7 +742,6 @@ async def bot():
     finally:
         await client.close_connection()
         print("Bağlantı kapatıldı.")
-
 
 # ══════════════════════════════════════════════════════════════
 # BAŞLAT
