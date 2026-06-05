@@ -54,21 +54,21 @@ MAJOR_LISTESI = {
 # ══════════════════════════════════════════════════════════════
 # Katman 1 — 15 dakika
 K1_RSI_MIN        = 15      # Bu altı = serbest düşüş, atla
-K1_RSI_MAX        = 38      # 40'tan 38'e indirildi — RSI 38-40 çok zayıf dip
+K1_RSI_MAX        = 40      # RSI bu altında olmalı (38'den 40'a gevşetildi)
 K1_OBV_PERIYOT    = 10      # OBV trendi için kaç mum
 K1_BB_PERIYOT     = 20      # Bollinger bant mum sayısı
 K1_BB_STD         = 2.0     # Bollinger standart sapma
 K1_BB_SIKISMA     = 0.06    # Bant genişliği / orta < bu = sıkışma
-K1_MIN_SKOR       = 6       # Katman 1 geçmek için min skor
+K1_MIN_SKOR       = 5       # Katman 1 geçmek için min skor (6'dan 5'e)
 
 # Katman 2 — 1 dakika
 K2_HACIM_KATI     = 3.0     # Medyan hacmin kaç katı (minimum)
 K2_HACIM_MAX      = 50.0    # Bu kadar üstü = ince piyasa gürültüsü, reddet
-K2_TAKER_MIN      = 0.60    # Minimum taker buy oranı (%60)
+K2_TAKER_MIN      = 0.58    # Minimum taker buy oranı (%60'dan %58'e gevşetildi)
 K2_TAKER_MAX      = 0.92    # Bu kadar üstü = tek işlem spike'ı, güvenilmez
-K2_MIN_USD        = 5000    # O mumda minimum $5000 USD hacim olmalı
-K2_MIN_5DK        = 0.10    # 5dk değişim min %0.1 (fiyat kıpırdamalı)
-K2_MIN_SKOR       = 16      # Toplam skor minimum (14'ten 16'ya sıkılaştırıldı)
+K2_MIN_USD        = 3000    # Minimum USD hacim ($5000'dan $3000'e gevşetildi)
+K2_MIN_5DK        = 0.05    # 5dk değişim min %0.05 (%0.1'den gevşetildi)
+K2_MIN_SKOR       = 14      # Toplam skor minimum (16'dan 14'e gevşetildi)
 
 # Pump koruması
 PUMP_SAAT         = 6       # Son kaç saat
@@ -94,7 +94,7 @@ WS_YENILE       = False # WebSocket yenileme bayrağı
 # Kısa sürede çok fazla sinyal = Bitcoin hareketi, gerçek sinyal değil
 SON_SINYALLER   = []   # (zaman, sembol) listesi
 SPAM_PENCERE    = 300  # 5 dakika
-SPAM_ESIK       = 3    # 5 dakikada max bu kadar sinyal gönder
+SPAM_ESIK       = 5    # 5 dakikada max 5 sinyal (3'ten 5'e gevşetildi)
 
 # ══════════════════════════════════════════════════════════════
 # TELEGRAM
@@ -439,7 +439,7 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     elif taker >= 0.58: skor += 2; sebepler.append(f"Alış %{taker*100:.0f}")
 
     # VWAP skoru — fiyat VWAP'ın çok altındaysa reddet
-    if vwap_fark < -0.50: return None   # -%0.5 altı = momentum yok, sinyal verme
+    if vwap_fark < -0.80: return None   # -%0.8 altı = momentum yok (-0.5'ten gevşetildi)
 
     if   vwap_fark >= 0.5:  skor += 3; sebepler.append(f"VWAP kırıldı (+%{vwap_fark:.2f}) ✅")
     elif vwap_fark >= -0.2: skor += 2; sebepler.append(f"VWAP yakın (%{vwap_fark:.2f})")
