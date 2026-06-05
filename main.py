@@ -90,6 +90,12 @@ IZLENEN         = set() # Şu an izlenen coinler
 SINYAL_ZAMANI   = {}   # Son sinyal zamanları
 WS_YENILE       = False # WebSocket yenileme bayrağı
 
+# Piyasa geneli spam koruması
+# Kısa sürede çok fazla sinyal = Bitcoin hareketi, gerçek sinyal değil
+SON_SINYALLER   = []   # (zaman, sembol) listesi
+SPAM_PENCERE    = 300  # 5 dakika
+SPAM_ESIK       = 3    # 5 dakikada max bu kadar sinyal gönder
+
 # ══════════════════════════════════════════════════════════════
 # TELEGRAM
 # ══════════════════════════════════════════════════════════════
@@ -625,6 +631,19 @@ async def isle(msg: dict, session: aiohttp.ClientSession):
 
     # Sinyal onaylandı — cooldown başlat
     SINYAL_ZAMANI[sembol] = time.time()
+
+    # ── Piyasa geneli spam koruması ──────────────────────────────
+    # 5 dakikada 3'ten fazla sinyal = Bitcoin hareketi yansıması
+    # Bu durumda sinyali gönderme, sadece logla
+    simdi = time.time()
+    SON_SINYALLER.append((simdi, sembol))
+    # 5 dakika dışını temizle
+    SON_SINYALLER[:] = [(t, s) for t, s in SON_SINYALLER if simdi - t < SPAM_PENCERE]
+
+    if len(SON_SINYALLER) > SPAM_ESIK:
+        print(f"[Spam Filtre] {sembol.upper()} sinyali tutuldu "
+              f"({len(SON_SINYALLER)} sinyal / 5dk — piyasa geneli hareket)")
+        return
 
     # L/S oranı çek
     ls = await ls_cek(session, sembol)
