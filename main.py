@@ -709,32 +709,83 @@ async def bot():
                     continue
 
                 streams = [f"{s}@kline_1m" for s in list(IZLENEN)]
-                print(f"📡 WebSocket: {len(streams)} coin izleniyor")
+                baglanti_zamani = time.time()
                 WS_YENILE = False
+
+                # Sayaçlar
+                mesaj_sayisi      = 0   # Bu oturumda kaç mesaj geldi
+                timeout_sayisi    = 0   # Peş peşe kaç timeout oldu
+                son_heartbeat     = time.time()
+                MAX_TIMEOUT       = 4   # Bu kadar peş peşe timeout = bağlantı koptu
+
+                print(f"[WS] Bağlanıyor: {len(streams)} stream | {tr_saat()}")
 
                 try:
                     async with bm.multiplex_socket(streams) as stream:
+                        print(f"[WS] ✅ Bağlantı kuruldu: {len(streams)} coin izleniyor")
+
                         while True:
                             try:
                                 res = await asyncio.wait_for(
                                     stream.recv(), timeout=45
                                 )
+
+                                # Mesaj geldi — timeout sayacını sıfırla
+                                mesaj_sayisi += 1
+                                timeout_sayisi = 0
+
                                 await isle(res, session)
+
+                                # Her 5 dakikada heartbeat logu
+                                if time.time() - son_heartbeat > 300:
+                                    sure = int((time.time() - baglanti_zamani) / 60)
+                                    print(f"[WS] 💓 Sağlıklı | "
+                                          f"{mesaj_sayisi} mesaj | "
+                                          f"{sure} dk uptime | "
+                                          f"{len(streams)} coin | {tr_saat()}")
+                                    son_heartbeat = time.time()
 
                                 # İzleme listesi değiştiyse sessizce yenile
                                 if WS_YENILE:
-                                    print("📡 İzleme listesi güncellendi, yenileniyor...")
+                                    sure = int((time.time() - baglanti_zamani) / 60)
+                                    print(f"[WS] İzleme güncellendi, yenileniyor "
+                                          f"({sure} dk sonra, {mesaj_sayisi} mesaj)")
                                     break
 
                             except asyncio.TimeoutError:
-                                pass  # Normal, sessizce devam
+                                # ───────────────────────────────────────────
+                                # 45sn mesaj gelmedi. Normal olabilir (piyasa
+                                # saatlerinde nadiren olur) ama peş peşe
+                                # geliyorsa bağlantı kopmuş demektir.
+                                # ───────────────────────────────────────────
+                                timeout_sayisi += 1
+                                gecen = int(time.time() - baglanti_zamani)
+                                print(f"[WS] ⚠️ Timeout #{timeout_sayisi} — "
+                                      f"45sn mesaj yok | "
+                                      f"Uptime: {gecen}sn | {tr_saat()}")
+
+                                if timeout_sayisi >= MAX_TIMEOUT:
+                                    # Peş peşe 4 timeout = ~3 dakika mesaj yok
+                                    # Bağlantı sessizce ölmüş, zorla yenile
+                                    print(f"[WS] ❌ {MAX_TIMEOUT} peş peşe timeout! "
+                                          f"Bağlantı koptu, yenileniyor... | {tr_saat()}")
+                                    break
+
                             except Exception as e:
-                                print(f"[WS Mesaj Hata] {e}")
+                                # Gerçek hata — hangi hata olduğunu logla
+                                gecen = int(time.time() - baglanti_zamani)
+                                print(f"[WS] ❌ Hata: {type(e).__name__}: {e} | "
+                                      f"Uptime: {gecen}sn | "
+                                      f"Toplam mesaj: {mesaj_sayisi} | {tr_saat()}")
                                 break
 
                 except Exception as e:
-                    print(f"[WS Bağlantı Hata] {e}")
+                    # Bağlantı hiç kurulamadı veya stream açılamadı
+                    print(f"[WS] ❌ Bağlantı kurulamadı: {type(e).__name__}: {e} | {tr_saat()}")
                     await asyncio.sleep(15)
+                else:
+                    # Döngü break ile çıktı, kısa bekle ve yeniden bağlan
+                    await asyncio.sleep(3)
 
     except Exception as e:
         print(f"[Bot Hata] {e}")
