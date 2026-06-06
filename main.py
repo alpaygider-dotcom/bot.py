@@ -67,29 +67,32 @@ OLU_LISTESI = {
 # PARAMETRELER — Dengeli ayar
 # ══════════════════════════════════════════════════════════════
 
-# ── Katman 1 (15dk) ─────────────────────────────────────────
+# ── Katman 1 (15dk) — İzleme listesi filtresi, gevşek olmalı ──
 K1_RSI_MIN      = 15    # Altı = serbest düşüş, atla
-K1_RSI_MAX      = 38    # Üstü = gerçek dip değil (39-40 filtresi)
+K1_RSI_MAX      = 45    # İzleme için 45'e kadar kabul et (sinyal K2'de üretilir)
 K1_OBV_PERIYOT  = 10    # OBV trend hesabı için kaç mum
 K1_BB_PERIYOT   = 20    # Bollinger bant periyodu
 K1_BB_STD       = 2.0   # Bollinger standart sapma çarpanı
 K1_BB_SIKISMA   = 0.06  # Bant dar ise volatilite bekleniyor
-K1_BB_MAX       = 0.30  # BB pozisyonu bu üstü = dip değil, HARD REDDET
-K1_MIN_SKOR     = 6     # K1 geçmek için minimum skor
+K1_BB_MAX       = 0.45  # BB pozisyonu filtresi — izleme için gevşek (sinyal K2'de)
+K1_MIN_SKOR     = 4     # İzlemeye almak için düşük eşik
 
-# ── Katman 2 (1dk) ──────────────────────────────────────────
+# ── Katman 2 (1dk) — Gerçek sinyal filtresi, sıkı olmalı ───
+K2_RSI_MAX      = 38    # K2'de RSI kontrolü — 38 üstü sinyal verme
+K2_BB_MAX       = 0.35  # K2'de BB kontrolü — 0.35 üstü sinyal verme
 K2_HACIM_MIN    = 3.0   # Medyan hacmin minimum kaç katı
 K2_HACIM_MAX    = 50.0  # Üstü = ince piyasa gürültüsü
 K2_TAKER_MIN    = 0.60  # Minimum taker buy oranı (%60)
 K2_TAKER_MAX    = 0.92  # Üstü = tek işlem spike'ı, güvenilmez
-K2_USD_MIN      = 5000  # Minimum USD hacim (o mumda)
+K2_USD_MIN      = 15000  # Minimum USD hacim — $5K çok düşük, micro-cap filtresi
 K2_5DK_MIN      = 0.05  # 5dk minimum fiyat hareketi %
-K2_VWAP_MIN     = -0.80 # VWAP'ın bu kadar altında olanı reddet
+K2_VWAP_MIN     = -0.50 # VWAP altı limit sıkılaştırıldı (-0.80 → -0.50)
 K2_MIN_SKOR     = 15    # Toplam minimum skor (K1 + K2)
 
 # ── Koruma ──────────────────────────────────────────────────
-PUMP_SAAT       = 6     # Pump koruması: son kaç saat
-PUMP_PCT        = 15.0  # Bu kadar çıkmışsa sinyal verme
+PUMP_SAAT       = 6     # Kısa vadeli pump: son 6 saat
+PUMP_PCT        = 12.0  # 6 saatte bu kadar çıkmışsa reddet
+PUMP_24H_PCT    = 20.0  # 24 saatte bu kadar çıkmışsa reddet (yeni)
 
 # ── Sistem ──────────────────────────────────────────────────
 SINYAL_BEKLEME  = 1800  # Aynı coin için min sinyal arası (30dk)
@@ -179,12 +182,20 @@ def bollinger(fiyatlar: list, n: int = 20, std_k: float = 2.0) -> dict:
 
 def obv_analiz(fiyatlar: list, hacimler: list, n: int = 10) -> tuple:
     """
-    OBV trendi + Bullish Divergence
-    Divergence: Fiyat düşüyor ama OBV yükseliyor = gizli birikim
-    Döner: (yukseliyor, divergence, aciklama)
+    OBV trend + Bullish Divergence — Düzeltilmiş hesap
+
+    ESKİ SORUN: (obv[-1] - obv[0]) / max(abs(obv[0]), 1) * 100
+    OBV sıfırdan başladığında bölüm sıfıra yakın → FOGO +1014%, BAT +470% gibi
+    anlamsız yüzdeler çıkıyor, sinyal skoru şişiyor.
+
+    YENİ YÖNTEM:
+    - Trend: OBV EMA(5) > OBV EMA(20) → gerçek yükseliş trendi
+    - Divergence: Fiyat Lower Low yaparken OBV Higher Low yapıyor → gizli birikim
     """
-    if len(fiyatlar) < n + 1 or len(fiyatlar) != len(hacimler):
+    if len(fiyatlar) < 25 or len(fiyatlar) != len(hacimler):
         return False, False, ""
+
+    # OBV hesapla
     obv = [0.0]
     for i in range(1, len(fiyatlar)):
         if fiyatlar[i] > fiyatlar[i-1]:
@@ -193,16 +204,26 @@ def obv_analiz(fiyatlar: list, hacimler: list, n: int = 10) -> tuple:
             obv.append(obv[-1] - hacimler[i])
         else:
             obv.append(obv[-1])
-    obv_trend   = (obv[-1] - obv[-n]) / max(abs(obv[-n]), 1) * 100
-    fiyat_trend = (fiyatlar[-1] - fiyatlar[-n]) / fiyatlar[-n] * 100
-    yukseliyor  = obv_trend > 2.0
-    divergence  = fiyat_trend < -1.0 and obv_trend > 1.0
+
+    # Trend: OBV EMA(5) vs EMA(20)
+    # Yüzde yerine EMA karşılaştırması kullan — sıfır bölme sorunu yok
+    obv_ema5  = ema(obv, 5)
+    obv_ema20 = ema(obv, 20)
+    yukseliyor = obv_ema5 > obv_ema20 * 1.001  # %0.1 marj
+
+    # Gerçek Divergence: Fiyat LL (Lower Low) yaparken OBV HL (Higher Low) yapıyor
+    # Son N mumda fiyat yeni dip yaptı mı?
+    fiyat_ll = fiyatlar[-1] < min(fiyatlar[-n:-1])  # Fiyat son N mumun dibi
+    # OBV son N mumun başından daha yüksek mi?
+    obv_hl   = obv[-1] > obv[-n]                    # OBV yükseldi
+    divergence = fiyat_ll and obv_hl
+
     if divergence:
-        return True, True,  f"🔍 Gizli Birikim (OBV {obv_trend:+.1f}%)"
+        return True, True,  "🔍 Gizli Birikim (Fiyat↓ OBV↑)"
     elif yukseliyor:
-        return True, False, f"📈 OBV Yükseliyor ({obv_trend:+.1f}%)"
+        return True, False, "📈 OBV EMA Yükseliyor"
     else:
-        return False, False, f"📉 OBV Düşüyor ({obv_trend:+.1f}%)"
+        return False, False, "📉 OBV EMA Düşüyor"
 
 
 def vwap(yuksekler, dusukler, kapanis, hacimler) -> float:
@@ -219,15 +240,28 @@ def vwap(yuksekler, dusukler, kapanis, hacimler) -> float:
 
 def pump_var_mi(fiyatlar: list) -> tuple:
     """
-    Son PUMP_SAAT saatte aşırı yükseliş var mı?
+    Pump koruması — iki kontrol:
+    1. Son 6 saatte %12+ yükseliş (kısa vadeli pump)
+    2. Son 24 saatte %20+ yükseliş (trend pump)
     15dk mumlar: 1 saat = 4 mum
     """
-    n = PUMP_SAAT * 4
-    if len(fiyatlar) < n:
-        return False, 0.0
-    en_dusuk = min(fiyatlar[-n:])
-    pct      = ((fiyatlar[-1] - en_dusuk) / en_dusuk * 100) if en_dusuk > 0 else 0
-    return pct >= PUMP_PCT, round(pct, 1)
+    # 6 saatlik kontrol
+    n6 = PUMP_SAAT * 4  # 24 mum
+    if len(fiyatlar) >= n6:
+        en_dusuk_6h = min(fiyatlar[-n6:])
+        pct_6h = ((fiyatlar[-1] - en_dusuk_6h) / en_dusuk_6h * 100) if en_dusuk_6h > 0 else 0
+        if pct_6h >= PUMP_PCT:
+            return True, round(pct_6h, 1)
+
+    # 24 saatlik kontrol
+    n24 = 24 * 4  # 96 mum
+    if len(fiyatlar) >= n24:
+        en_dusuk_24h = min(fiyatlar[-n24:])
+        pct_24h = ((fiyatlar[-1] - en_dusuk_24h) / en_dusuk_24h * 100) if en_dusuk_24h > 0 else 0
+        if pct_24h >= PUMP_24H_PCT:
+            return True, round(pct_24h, 1)
+
+    return False, 0.0
 
 # ══════════════════════════════════════════════════════════════
 # LONG/SHORT ORANI
@@ -351,19 +385,16 @@ def katman1(sembol: str) -> dict | None:
     bb = bollinger(f, K1_BB_PERIYOT, K1_BB_STD)
     obv_yukseliyor, obv_div, obv_acik = obv_analiz(f, h, K1_OBV_PERIYOT)
 
-    # ── HARD FİLTRELER (skor hesabı yok, direkt reddet) ─────
+    # ── HARD FİLTRELER ───────────────────────────────────────
+    # K1 sadece izleme listesi için — gevşek tut
+    # Asıl sıkı kontroller K2'de yapılır
 
-    # RSI aralık dışı
+    # RSI tamamen dışarıda (serbest düşüş veya aşırı alım)
     if not (K1_RSI_MIN <= r <= K1_RSI_MAX):
         return None
 
-    # BB pozisyonu çok yukarıda = dip değil
-    # Divergence istisnası: fiyat düşerken OBV yükseliyorsa BB biraz yukarıda olabilir
-    if bb["yuzde_b"] > K1_BB_MAX and not obv_div:
-        return None
-
-    # OBV şartı — yükselmeli ya da divergence olmalı
-    if not obv_yukseliyor and not obv_div:
+    # BB çok yukarıda VE OBV yükselmiyor = ilgisiz coin
+    if bb["yuzde_b"] > K1_BB_MAX and not obv_yukseliyor and not obv_div:
         return None
 
     # ── SKOR HESABI ─────────────────────────────────────────
@@ -446,6 +477,11 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     if d5       < K2_5DK_MIN:    return None  # Fiyat kıpırdamıyor
     if d3       < -1.5:          return None  # Hâlâ düşüyor
     if vwap_fark < K2_VWAP_MIN:  return None  # VWAP'tan çok uzak
+
+    # RSI ve BB kontrolleri K2'de yapılır (K1 sadece izleme listesi)
+    if k1["rsi"] > K2_RSI_MAX:              return None  # RSI 38+ sinyal verme
+    if k1["bb"]["yuzde_b"] > K2_BB_MAX and not k1["obv_div"]:
+        return None  # BB ortasında ve divergence yok = dip değil
 
     # ── SKOR HESABI (K1 skorundan devam) ────────────────────
     skor     = k1["skor"]
@@ -585,6 +621,9 @@ async def tarama(client: AsyncClient):
     # En yüksek skorlulardan MAX_IZLEME kadar al
     adaylar.sort(key=lambda x: x[1]["skor"], reverse=True)
     yeni = {s for s, _ in adaylar[:MAX_IZLEME]}
+
+    print(f"[Tarama] K1 geçen: {len(adaylar)} coin → "
+          f"İzlemeye alınan: {len(yeni)} coin | {tr_saat()}")
 
     # Yeni coinler için 1dk veri yükle
     yeni_eklenen = yeni - IZLENEN
