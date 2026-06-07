@@ -85,8 +85,11 @@ K2_HACIM_MAX    = 50.0  # Üstü = ince piyasa gürültüsü
 K2_TAKER_MIN    = 0.60  # Minimum taker buy oranı (%60)
 K2_TAKER_MAX    = 0.92  # Üstü = tek işlem spike'ı, güvenilmez
 K2_USD_MIN      = 15000  # Minimum USD hacim — $5K çok düşük, micro-cap filtresi
-K2_5DK_MIN      = 0.05  # 5dk minimum fiyat hareketi %
-K2_VWAP_MIN     = -0.50 # VWAP altı limit sıkılaştırıldı (-0.80 → -0.50)
+K2_5DK_MIN      = 0.05  # 5dk minimum fiyat hareketi % (dönüş başlamalı)
+K2_5DK_MAX      = 3.0   # 5dk maksimum % — üstü = zaten bounce oldu, geç kaldık
+K2_15DK_MAX     = 2.0   # 15dk maksimum % — +2%+ = dip geçmiş, bounce tepesindeyiz
+K2_VWAP_MIN     = -0.50 # VWAP altı limit
+K2_VWAP_MAX     = 1.50  # VWAP üstü limit — +1.5%+ = dip değil, momentum bölgesi
 K2_MIN_SKOR     = 15    # Toplam minimum skor (K1 + K2)
 
 # ── Koruma ──────────────────────────────────────────────────
@@ -95,11 +98,12 @@ PUMP_PCT        = 12.0  # 6 saatte bu kadar çıkmışsa reddet
 PUMP_24H_PCT    = 20.0  # 24 saatte bu kadar çıkmışsa reddet (yeni)
 
 # ── Sistem ──────────────────────────────────────────────────
-SINYAL_BEKLEME  = 1800  # Aynı coin için min sinyal arası (30dk)
+SINYAL_BEKLEME  = 10800 # Aynı coin min sinyal arası: 3 SAAT (30dk'dan artırıldı)
 MIN_15DK_MUM    = 50    # Analiz için min 15dk mum sayısı
 MIN_1DK_MUM     = 30    # Analiz için min 1dk mum sayısı
 TARAMA_SURE     = 300   # 15dk tarama aralığı (5dk)
 MAX_IZLEME      = 40    # Aynı anda max izlenen coin
+BTC_RSI_MIN     = 45    # BTC RSI bu altındaysa piyasa bearish, sinyal verme
 
 # ── Spam Koruması ───────────────────────────────────────────
 SPAM_PENCERE    = 300   # 5 dakika
@@ -114,6 +118,7 @@ IZLENEN       = set()   # Şu an izlenen coinler
 SINYAL_ZAMANI = {}      # Son sinyal zamanları {sembol: timestamp}
 SON_SINYALLER = []      # Spam koruması için [(timestamp, sembol)]
 WS_YENILE     = False   # WebSocket yenileme bayrağı
+BTC_RSI       = 50.0    # BTC 15dk RSI — taramada güncellenir
 
 # ══════════════════════════════════════════════════════════════
 # TELEGRAM
@@ -437,11 +442,13 @@ def katman1(sembol: str) -> dict | None:
 # ══════════════════════════════════════════════════════════════
 # KATMAN 2 — 1 DAKİKALIK ANALİZ
 # ══════════════════════════════════════════════════════════════
-def katman2(sembol: str, k1: dict) -> dict | None:
+def katman2(sembol: str, k1: dict, min_skor: int = None) -> dict | None:
     """
     1dk verisiyle giriş zamanlaması.
-    Geçmesi için: Hacim x3+, Taker %60+, VWAP filtresi, fiyat kıpırdıyor
+    min_skor: BTC bearish iken dinamik olarak yükseltilir
     """
+    if min_skor is None:
+        min_skor = K2_MIN_SKOR
     if sembol not in STORE_1DK:
         return None
     d = STORE_1DK[sembol]
@@ -475,8 +482,11 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     if taker    > K2_TAKER_MAX:  return None  # Tek işlem spike
     if usd_hacim < K2_USD_MIN:   return None  # USD hacim çok düşük
     if d5       < K2_5DK_MIN:    return None  # Fiyat kıpırdamıyor
+    if d5       > K2_5DK_MAX:    return None  # 5dk +3%+ = bounce zaten oldu, geç
+    if d15      > K2_15DK_MAX:   return None  # 15dk +2%+ = dip geçmiş, bounce tepesi
     if d3       < -1.5:          return None  # Hâlâ düşüyor
     if vwap_fark < K2_VWAP_MIN:  return None  # VWAP'tan çok uzak
+    if vwap_fark > K2_VWAP_MAX:  return None  # VWAP +1.5%+ = momentum, dip değil
 
     # RSI ve BB kontrolleri K2'de yapılır (K1 sadece izleme listesi)
     if k1["rsi"] > K2_RSI_MAX:              return None  # RSI 38+ sinyal verme
@@ -518,7 +528,7 @@ def katman2(sembol: str, k1: dict) -> dict | None:
     if k1["obv_div"]:
         skor += 2
 
-    if skor < K2_MIN_SKOR:
+    if skor < min_skor:
         return None
 
     # Güç seviyesi
@@ -594,11 +604,23 @@ async def sinyal_gonder(sembol: str, k2: dict, ls: dict | None):
 # TARAMA GÖREVİ — Her 5 dakikada (REST API)
 # ══════════════════════════════════════════════════════════════
 async def tarama(client: AsyncClient):
-    global IZLENEN, WS_YENILE
+    global IZLENEN, WS_YENILE, BTC_RSI
 
     tum = await sembolleri_cek(client)
     if not tum:
         return
+
+    # ── BTC trend kontrolü ──────────────────────────────────
+    # BTC düşüşteyken altcoin dip sinyalleri genelde başarısız olur
+    try:
+        btc_klines = await client.get_klines(symbol="BTCUSDT", interval="15m", limit=30)
+        btc_fiyat  = [float(k[4]) for k in btc_klines]
+        BTC_RSI    = rsi(btc_fiyat)
+        print(f"[Tarama] BTC RSI: {BTC_RSI:.1f} | "
+              f"{'✅ Piyasa uygun' if BTC_RSI >= BTC_RSI_MIN else '⚠️ BTC bearish, sinyal eşiği yükseltildi'}")
+
+    except Exception as e:
+        print(f"[BTC RSI Hata] {e}")
 
     print(f"[Tarama] {len(tum)} coin taranıyor...")
 
@@ -675,9 +697,15 @@ async def isle(msg: dict, session: aiohttp.ClientSession):
         if len(d[anahtar]) > 150:
             d[anahtar].pop(0)
 
-    # ── Cooldown: aynı coin 30dk içinde tekrar sinyal vermez ─
+    # ── Cooldown: aynı coin 3 saatte bir sinyal verebilir ────
     if time.time() - SINYAL_ZAMANI.get(sembol, 0) < SINYAL_BEKLEME:
         return
+
+    # ── BTC trend filtresi ───────────────────────────────────
+    # BTC bearish iken sinyal eşiğini yükselt
+    # (BTC düşerken altcoin dip sinyalleri çoğunlukla başarısız)
+    btc_bearish = BTC_RSI < BTC_RSI_MIN
+    min_skor_dinamik = K2_MIN_SKOR + (3 if btc_bearish else 0)
 
     # ── Katman 1 analizi ─────────────────────────────────────
     k1 = katman1(sembol)
@@ -685,7 +713,7 @@ async def isle(msg: dict, session: aiohttp.ClientSession):
         return
 
     # ── Katman 2 analizi ─────────────────────────────────────
-    k2 = katman2(sembol, k1)
+    k2 = katman2(sembol, k1, min_skor_dinamik)
     if not k2:
         return
 
