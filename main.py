@@ -53,14 +53,18 @@ MAJOR_LISTESI = {
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "BCHUSDT", "LTCUSDT", "LINKUSDT", "DOTUSDT", "ADAUSDT",
     "AVAXUSDT", "MATICUSDT", "TRXUSDT", "ATOMUSDT", "NEARUSDT",
+    "XLMUSDT", "ARBUSDT", "FILUSDT",   # Top-20 coinler eklendi
 }
 
 # Ölü / güvenilmez / manipülasyona açık coinler
 OLU_LISTESI = {
     "LUNCUSDT", "USTCUSDT", "MOONUSDT", "SAFEMOONUSDT",
-    "SHIBUSDT",  # Çok ince piyasa, tek işlem hacmi patlatıyor
-    "PEPEUSDT",  # Meme coin, manipülasyon riski
-    "1MBABYDOGEUSDT", "BABYDOGEUSDT",
+    "SHIBUSDT", "PEPEUSDT", "1MBABYDOGEUSDT", "BABYDOGEUSDT",
+}
+
+# Emtia tokenları — altın/gümüş fiyatı takip eder, kripto gibi davranmaz
+EMTIA_LISTESI = {
+    "PAXGUSDT", "XAUTUSDT",
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -327,6 +331,7 @@ async def sembolleri_cek(client: AsyncClient) -> list:
             and s["symbol"] not in STABLECOIN_LISTESI
             and s["symbol"] not in MAJOR_LISTESI
             and s["symbol"] not in OLU_LISTESI
+            and s["symbol"] not in EMTIA_LISTESI
         ])
     except Exception as e:
         print(f"[Sembol Hata] {e}")
