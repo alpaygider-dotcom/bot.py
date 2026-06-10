@@ -91,12 +91,13 @@ K1_MIN_SKOR     = 4     # İzlemeye almak için düşük eşik
 # ── Katman 2 (1dk) — Gerçek sinyal filtresi, sıkı olmalı ───
 K2_RSI_MAX      = 38    # K2'de RSI kontrolü — 38 üstü sinyal verme
 K2_BB_MAX       = 0.35  # K2'de BB kontrolü — 0.35 üstü sinyal verme
-K2_HACIM_MIN    = 3.0   # Medyan hacmin minimum kaç katı
+K2_HACIM_MIN    = 2.5   # Medyan hacmin minimum kaç katı (3.0'dan gevşetildi)
 K2_HACIM_MAX    = 50.0  # Üstü = ince piyasa gürültüsü
-K2_TAKER_MIN    = 0.60  # Minimum taker buy oranı (%60)
+K2_TAKER_MIN    = 0.60  # Minimum taker buy oranı — son mum
+K2_TAKER5_MIN   = 0.55  # Son 5 mumun ortalama taker buy — tek mum spike'larını önler
 K2_TAKER_MAX    = 0.92  # Üstü = tek işlem spike'ı, güvenilmez
-K2_USD_MIN      = 15000  # Minimum USD hacim — $5K çok düşük, micro-cap filtresi
-K2_5DK_MIN      = 0.05  # 5dk minimum fiyat hareketi % (dönüş başlamalı)
+K2_USD_MIN      = 15000  # Minimum USD hacim (son mum)
+K2_5DK_MIN      = 0.08  # 5dk minimum fiyat hareketi % (0.05'ten yükseltildi)
 K2_5DK_MAX      = 3.0   # 5dk maksimum % — üstü = zaten bounce oldu, geç kaldık
 K2_15DK_MAX     = 2.0   # 15dk maksimum % — +2%+ = dip geçmiş, bounce tepesindeyiz
 K2_VWAP_MIN     = -0.50 # VWAP altı limit
@@ -113,10 +114,10 @@ SINYAL_BEKLEME  = 10800 # Aynı coin min sinyal arası: 3 SAAT
 MIN_15DK_MUM    = 50    # Analiz için min 15dk mum sayısı
 MIN_1DK_MUM     = 30    # Analiz için min 1dk mum sayısı
 TARAMA_SURE     = 300   # 15dk tarama aralığı (5dk)
-MAX_IZLEME      = 40    # Aynı anda max izlenen coin
+MAX_IZLEME      = 55    # Aynı anda max izlenen coin (40'tan artırıldı)
 BTC_RSI_MIN     = 45    # BTC RSI bu altındaysa piyasa bearish
-MIN_24H_HACIM   = 15_000_000  # Min 24 saatlik USD hacim — otomatik meme/ölü coin filtresi
-RS_MIN          = -8.0  # BTC'ye göre göreceli güç — coinin BTC'den max bu kadar geride olabileceği %
+MIN_24H_HACIM   = 15_000_000  # Min 24 saatlik USD hacim
+RS_MIN          = -10.0 # BTC göreceli güç eşiği (-8'den -10'a gevşetildi)
 
 # ── Spam Koruması ───────────────────────────────────────────
 SPAM_PENCERE    = 300   # 5 dakika
@@ -305,7 +306,7 @@ async def ls_cek(session: aiohttp.ClientSession, sembol: str) -> dict | None:
             s_pct  = float(d[-1]["shortAccount"])
             degisim = ((simdi - once) / once * 100) if once > 0 else 0
             return {"l": l_pct, "s": s_pct, "degisim": degisim}
-    except:
+    except Exception:
         return None
 
 
@@ -371,7 +372,7 @@ async def cek_15dk(client: AsyncClient, sembol: str) -> bool:
             "h": [float(k[5]) for k in klines[:-1]],   # hacim
         }
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -385,7 +386,7 @@ async def cek_1dk(client: AsyncClient, sembol: str):
             "h":  [float(k[5]) for k in klines[:-1]],  # hacim
             "tb": [float(k[9]) for k in klines[:-1]],  # taker buy volume ✅
         }
-    except:
+    except Exception:
         pass
 
 # ══════════════════════════════════════════════════════════════
@@ -427,14 +428,13 @@ def katman1(sembol: str) -> dict | None:
         return None
 
     # ── RSI YAPIŞMASI FİLTRESİ ───────────────────────────────
-    # RSI uzun süredir düşük + fiyat düşüyor = falling knife (düşen bıçak)
-    # Çözüm: 10 mum önce de RSI düşüktü ve fiyat o zamandan beri düşüyorsa atla
-    # Divergence istisnası: OBV yükseliyorsa gerçek birikim olabilir, atlatma
-    if len(f) >= 15 and not obv_div:
-        rsi_10_once   = rsi(f[:-10])
-        fiyat_dusuyor = f[-1] < f[-10]  # 10 mum öncesine göre hâlâ aşağıda
-        if rsi_10_once < K1_RSI_MAX and fiyat_dusuyor:
-            return None  # 10 mumdur hem RSI düşük hem fiyat düşüyor = falling knife
+    # 15 mum (225 dk) boyunca RSI düşük + fiyat düşüyor = falling knife
+    # Divergence istisnası: OBV yükseliyorsa gerçek birikim olabilir
+    if len(f) >= 20 and not obv_div:
+        rsi_15_once   = rsi(f[:-15])
+        fiyat_dusuyor = f[-1] < f[-15]
+        if rsi_15_once < K1_RSI_MAX and fiyat_dusuyor:
+            return None  # 15 mumdur hem RSI düşük hem fiyat düşüyor = falling knife
 
     # ── GÖRECELİ GÜÇ FİLTRESİ (BTC'ye karşı) ────────────────
     # Coin, BTC'den RS_MIN'den çok daha fazla düşüyorsa zayıf coin demektir
@@ -510,6 +510,15 @@ def katman2(sembol: str, k1: dict, min_skor: int = None) -> dict | None:
     taker    = son_tb / son_h if son_h > 0 else 0.5
     usd_hacim = son_h * son_f
 
+    # 5 mumluk taker buy ortalaması — tek mum balina spike'larını filtreler
+    # Tek mum %90 alış görünebilir ama 5 mum ortalaması %48 ise gerçek değil
+    if len(tb) >= 5 and len(h) >= 5:
+        toplam_h5  = sum(h[-5:])
+        toplam_tb5 = sum(tb[-5:])
+        taker5 = toplam_tb5 / toplam_h5 if toplam_h5 > 0 else 0.5
+    else:
+        taker5 = taker
+
     # VWAP — son 30 mum
     vw        = vwap(y[-30:], dd[-30:], f[-30:], h[-30:])
     vwap_fark = ((son_f - vw) / vw * 100) if vw > 0 else 0
@@ -522,8 +531,9 @@ def katman2(sembol: str, k1: dict, min_skor: int = None) -> dict | None:
     # ── HARD FİLTRELER ───────────────────────────────────────
     if hacim_k  < K2_HACIM_MIN:  return None  # Yeterli hacim yok
     if hacim_k  > K2_HACIM_MAX:  return None  # Gürültü spike
-    if taker    < K2_TAKER_MIN:  return None  # Alıcı baskısı yok
+    if taker    < K2_TAKER_MIN:  return None  # Son mum alıcı baskısı yok
     if taker    > K2_TAKER_MAX:  return None  # Tek işlem spike
+    if taker5   < K2_TAKER5_MIN: return None  # 5 mum ortalaması da alış baskısında olmalı
     if usd_hacim < K2_USD_MIN:   return None  # USD hacim çok düşük
     if d5       < K2_5DK_MIN:    return None  # Fiyat kıpırdamıyor
     if d5       > K2_5DK_MAX:    return None  # 5dk +3%+ = bounce zaten oldu, geç
@@ -745,10 +755,15 @@ async def isle(msg: dict, session: aiohttp.ClientSession):
         return
 
     # ── BTC trend filtresi ───────────────────────────────────
-    # BTC bearish iken sinyal eşiğini yükselt
-    # (BTC düşerken altcoin dip sinyalleri çoğunlukla başarısız)
-    btc_bearish = BTC_RSI < BTC_RSI_MIN
-    min_skor_dinamik = K2_MIN_SKOR + (3 if btc_bearish else 0)
+    # BTC sert düşüşte iken sinyal eşiğini dinamik olarak artır
+    if BTC_24H < -8.0:
+        # BTC 24 saatte %8+ düşüş = piyasa çöküyor, çok seçici ol
+        min_skor_dinamik = K2_MIN_SKOR + 5  # Skor 20 gerekir
+    elif BTC_RSI < BTC_RSI_MIN:
+        # BTC bearish ama çöküş değil = biraz daha seçici
+        min_skor_dinamik = K2_MIN_SKOR + 3  # Skor 18 gerekir
+    else:
+        min_skor_dinamik = K2_MIN_SKOR      # Normal: skor 15
 
     # ── Katman 1 analizi ─────────────────────────────────────
     k1 = katman1(sembol)
