@@ -53,13 +53,20 @@ MAJOR_LISTESI = {
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "BCHUSDT", "LTCUSDT", "LINKUSDT", "DOTUSDT", "ADAUSDT",
     "AVAXUSDT", "MATICUSDT", "TRXUSDT", "ATOMUSDT", "NEARUSDT",
-    "XLMUSDT", "ARBUSDT", "FILUSDT",   # Top-20 coinler eklendi
+    "XLMUSDT", "ARBUSDT", "FILUSDT", "INJUSDT", "DASHUSDT",
 }
 
-# Ölü / güvenilmez / manipülasyona açık coinler
+# Ölü / meme / oyun / manipülasyon coinler
 OLU_LISTESI = {
+    # Ölü projeler
     "LUNCUSDT", "USTCUSDT", "MOONUSDT", "SAFEMOONUSDT",
+    # Meme coinler — bot için uygun değil
     "SHIBUSDT", "PEPEUSDT", "1MBABYDOGEUSDT", "BABYDOGEUSDT",
+    "MEMEUSDT", "PUMPUSDT",
+    # Oyun tokenları — lansman sonrası sürekli düşer
+    "HMSTRUSDT", "PIXELUSDT", "PLAYDIPUSDT",
+    # Çin meme coinleri — yüksek volatilite, manipülasyon riski
+    "BINANCELIFEUSDT",   # 币安人生
 }
 
 # Emtia tokenları — altın/gümüş fiyatı takip eder, kripto gibi davranmaz
@@ -102,12 +109,14 @@ PUMP_PCT        = 12.0  # 6 saatte bu kadar çıkmışsa reddet
 PUMP_24H_PCT    = 20.0  # 24 saatte bu kadar çıkmışsa reddet (yeni)
 
 # ── Sistem ──────────────────────────────────────────────────
-SINYAL_BEKLEME  = 10800 # Aynı coin min sinyal arası: 3 SAAT (30dk'dan artırıldı)
+SINYAL_BEKLEME  = 10800 # Aynı coin min sinyal arası: 3 SAAT
 MIN_15DK_MUM    = 50    # Analiz için min 15dk mum sayısı
 MIN_1DK_MUM     = 30    # Analiz için min 1dk mum sayısı
 TARAMA_SURE     = 300   # 15dk tarama aralığı (5dk)
 MAX_IZLEME      = 40    # Aynı anda max izlenen coin
-BTC_RSI_MIN     = 45    # BTC RSI bu altındaysa piyasa bearish, sinyal verme
+BTC_RSI_MIN     = 45    # BTC RSI bu altındaysa piyasa bearish
+MIN_24H_HACIM   = 15_000_000  # Min 24 saatlik USD hacim — otomatik meme/ölü coin filtresi
+RS_MIN          = -8.0  # BTC'ye göre göreceli güç — coinin BTC'den max bu kadar geride olabileceği %
 
 # ── Spam Koruması ───────────────────────────────────────────
 SPAM_PENCERE    = 300   # 5 dakika
@@ -123,6 +132,7 @@ SINYAL_ZAMANI = {}      # Son sinyal zamanları {sembol: timestamp}
 SON_SINYALLER = []      # Spam koruması için [(timestamp, sembol)]
 WS_YENILE     = False   # WebSocket yenileme bayrağı
 BTC_RSI       = 50.0    # BTC 15dk RSI — taramada güncellenir
+BTC_24H       = 0.0     # BTC 24 saatlik değişim % — taramada güncellenir
 
 # ══════════════════════════════════════════════════════════════
 # TELEGRAM
@@ -320,19 +330,28 @@ def ls_yorum(ls: dict | None) -> str:
 # SEMBOL LİSTESİ
 # ══════════════════════════════════════════════════════════════
 async def sembolleri_cek(client: AsyncClient) -> list:
-    """Binance TR'deki aktif USDT çiftlerini çek, kara listeleri uygula"""
+    """
+    Binance'deki aktif USDT çiftlerini çek.
+    24 saatlik hacim filtresi uygula — meme/ölü coinleri otomatik eleyelim.
+    Blacklist tek tek elle yazmaktan çok daha güvenilir.
+    """
     try:
-        veri = await client.get_exchange_info()
-        return sorted([
-            s["symbol"].lower()
-            for s in veri.get("symbols", [])
-            if s["symbol"].endswith("USDT")
-            and s.get("status") == "TRADING"
-            and s["symbol"] not in STABLECOIN_LISTESI
-            and s["symbol"] not in MAJOR_LISTESI
-            and s["symbol"] not in OLU_LISTESI
-            and s["symbol"] not in EMTIA_LISTESI
-        ])
+        # get_ticker() tüm sembollerin 24h verilerini döner
+        tum_tickerlar = await client.get_ticker()
+        semboller = []
+        for t in tum_tickerlar:
+            sym        = t["symbol"]
+            hacim_24h  = float(t.get("quoteVolume", 0))  # USD cinsinden 24h hacim
+            if (sym.endswith("USDT")
+                    and hacim_24h >= MIN_24H_HACIM          # Min $15M 24h hacim
+                    and sym not in STABLECOIN_LISTESI
+                    and sym not in MAJOR_LISTESI
+                    and sym not in OLU_LISTESI
+                    and sym not in EMTIA_LISTESI):
+                semboller.append(sym.lower())
+        print(f"[Sembol] {len(semboller)} coin hacim filtresini geçti "
+              f"(min ${MIN_24H_HACIM/1e6:.0f}M 24h)")
+        return sorted(semboller)
     except Exception as e:
         print(f"[Sembol Hata] {e}")
         return []
@@ -406,6 +425,26 @@ def katman1(sembol: str) -> dict | None:
     # BB çok yukarıda VE OBV yükselmiyor = ilgisiz coin
     if bb["yuzde_b"] > K1_BB_MAX and not obv_yukseliyor and not obv_div:
         return None
+
+    # ── RSI YAPIŞMASI FİLTRESİ ───────────────────────────────
+    # RSI uzun süredir düşük + fiyat düşüyor = falling knife (düşen bıçak)
+    # Çözüm: 10 mum önce de RSI düşüktü ve fiyat o zamandan beri düşüyorsa atla
+    # Divergence istisnası: OBV yükseliyorsa gerçek birikim olabilir, atlatma
+    if len(f) >= 15 and not obv_div:
+        rsi_10_once   = rsi(f[:-10])
+        fiyat_dusuyor = f[-1] < f[-10]  # 10 mum öncesine göre hâlâ aşağıda
+        if rsi_10_once < K1_RSI_MAX and fiyat_dusuyor:
+            return None  # 10 mumdur hem RSI düşük hem fiyat düşüyor = falling knife
+
+    # ── GÖRECELİ GÜÇ FİLTRESİ (BTC'ye karşı) ────────────────
+    # Coin, BTC'den RS_MIN'den çok daha fazla düşüyorsa zayıf coin demektir
+    # Örnek: BTC -8%, Coin -18% → RS = -10 → reddet
+    # Örnek: BTC -8%, Coin -6% → RS = +2 → geç (coin BTC'den güçlü)
+    if len(f) >= 97 and BTC_24H < -3.0:  # BTC düşüşteyken kontrol et
+        coin_24h = ((f[-1] - f[-97]) / f[-97]) * 100
+        rs       = coin_24h - BTC_24H  # Pozitif = coin BTC'den güçlü
+        if rs < RS_MIN:  # Coin BTC'den RS_MIN'den fazla zayıf
+            return None
 
     # ── SKOR HESABI ─────────────────────────────────────────
     skor = 0
@@ -609,23 +648,22 @@ async def sinyal_gonder(sembol: str, k2: dict, ls: dict | None):
 # TARAMA GÖREVİ — Her 5 dakikada (REST API)
 # ══════════════════════════════════════════════════════════════
 async def tarama(client: AsyncClient):
-    global IZLENEN, WS_YENILE, BTC_RSI
+    global IZLENEN, WS_YENILE, BTC_RSI, BTC_24H
 
     tum = await sembolleri_cek(client)
     if not tum:
         return
 
     # ── BTC trend kontrolü ──────────────────────────────────
-    # BTC düşüşteyken altcoin dip sinyalleri genelde başarısız olur
     try:
-        btc_klines = await client.get_klines(symbol="BTCUSDT", interval="15m", limit=30)
+        btc_klines = await client.get_klines(symbol="BTCUSDT", interval="15m", limit=100)
         btc_fiyat  = [float(k[4]) for k in btc_klines]
         BTC_RSI    = rsi(btc_fiyat)
-        print(f"[Tarama] BTC RSI: {BTC_RSI:.1f} | "
-              f"{'✅ Piyasa uygun' if BTC_RSI >= BTC_RSI_MIN else '⚠️ BTC bearish, sinyal eşiği yükseltildi'}")
-
+        BTC_24H    = ((btc_fiyat[-1] - btc_fiyat[-97]) / btc_fiyat[-97] * 100) if len(btc_fiyat) >= 97 else 0.0
+        print(f"[Tarama] BTC RSI: {BTC_RSI:.1f} | 24h: {BTC_24H:+.1f}% | "
+              f"{'✅ Uygun' if BTC_RSI >= BTC_RSI_MIN else '⚠️ Bearish'}")
     except Exception as e:
-        print(f"[BTC RSI Hata] {e}")
+        print(f"[BTC Hata] {e}")
 
     print(f"[Tarama] {len(tum)} coin taranıyor...")
 
