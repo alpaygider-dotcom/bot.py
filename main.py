@@ -470,17 +470,34 @@ def katman1(sembol: str) -> dict | None:
     if bb["genislik"] < K1_BB_SIKISMA:
         skor += 1; sebepler.append("BB Sıkışması ⚡")
 
+    # ── GÖRECELİ GÜÇ SKORU (BONUS) ──────────────────────────
+    # Coin BTC'den güçlüyse → para o coine özel giriyor → bonus puan
+    # Bu tam olarak "dip + BTC'den bağımsız hareket" kombinasyonu
+    rs_degeri = None
+    if len(f) >= 97:
+        coin_24h = ((f[-1] - f[-97]) / f[-97]) * 100
+        rs_degeri = coin_24h - BTC_24H  # Pozitif = coin BTC'den güçlü
+
+        if   rs_degeri >= 5:
+            skor += 3; sebepler.append(f"BTC'den güçlü (RS +{rs_degeri:.1f}%) 💪💪")
+        elif rs_degeri >= 2:
+            skor += 2; sebepler.append(f"BTC'den güçlü (RS +{rs_degeri:.1f}%) 💪")
+        elif rs_degeri >= 0:
+            skor += 1; sebepler.append(f"BTC ile paralel (RS {rs_degeri:+.1f}%)")
+        # Negatif RS zaten filtre aşamasında yakalanıyor, skor verme
+
     if skor < K1_MIN_SKOR:
         return None
 
     return {
-        "skor":    skor,
-        "rsi":     r,
-        "bb":      bb,
-        "obv_div": obv_div,
-        "sebepler":sebepler,
-        "ema21":   ema(f, 21),
-        "ema50":   ema(f, 50) if len(f) >= 50 else None,
+        "skor":     skor,
+        "rsi":      r,
+        "bb":       bb,
+        "obv_div":  obv_div,
+        "sebepler": sebepler,
+        "ema21":    ema(f, 21),
+        "ema50":    ema(f, 50) if len(f) >= 50 else None,
+        "rs":       rs_degeri,  # Sinyal mesajında göster
     }
 
 # ══════════════════════════════════════════════════════════════
@@ -599,12 +616,14 @@ def katman2(sembol: str, k1: dict, min_skor: int = None) -> dict | None:
         "hacim_k":  hacim_k,
         "usd":      usd_hacim,
         "taker":    taker,
+        "taker5":   taker5,
         "d5":       d5,
         "d15":      d15,
         "rsi":      k1["rsi"],
         "bb":       k1["bb"],
         "obv_div":  k1["obv_div"],
         "sebepler": sebepler,
+        "rs":       k1.get("rs"),
     }
 
 # ══════════════════════════════════════════════════════════════
@@ -636,13 +655,19 @@ async def sinyal_gonder(sembol: str, k2: dict, ls: dict | None):
         f"\n"
         f"<b>⚡ 1dk Analiz:</b>\n"
         f"  Hacim: x{k2['hacim_k']:.1f}  (${k2['usd']:,.0f})\n"
-        f"  Alış Baskısı: %{k2['taker']*100:.0f}\n"
+        f"  Alış Baskısı: %{k2['taker']*100:.0f} (5dk ort: %{k2['taker5']*100:.0f})\n"
         f"  VWAP: {'+' if k2['vwap_f'] >= 0 else ''}{k2['vwap_f']:.2f}%\n"
         f"  5dk: {k2['d5']:+.1f}%  |  15dk: {k2['d15']:+.1f}%\n"
     )
 
     if ls_m:
         msg += f"\n<b>📊 L/S:</b> {ls_m}\n"
+
+    # BTC göreceli güç — varsa göster
+    if k2.get("rs") is not None:
+        rs = k2["rs"]
+        rs_emoji = "💪" if rs >= 2 else ("➡️" if rs >= 0 else "⚠️")
+        msg += f"\n<b>📈 BTC'ye RS:</b> {rs:+.1f}% {rs_emoji}\n"
 
     msg += (
         f"\n<b>Sebepler:</b>\n"
