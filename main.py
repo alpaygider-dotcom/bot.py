@@ -114,10 +114,9 @@ SINYAL_BEKLEME  = 10800 # Aynı coin min sinyal arası: 3 SAAT
 MIN_15DK_MUM    = 50    # Analiz için min 15dk mum sayısı
 MIN_1DK_MUM     = 30    # Analiz için min 1dk mum sayısı
 TARAMA_SURE     = 300   # 15dk tarama aralığı (5dk)
-MAX_IZLEME      = 55    # Aynı anda max izlenen coin (40'tan artırıldı)
+MAX_IZLEME      = 55    # Aynı anda max izlenen coin
 BTC_RSI_MIN     = 45    # BTC RSI bu altındaysa piyasa bearish
-MIN_24H_HACIM   = 15_000_000  # Min 24 saatlik USD hacim
-RS_MIN          = -10.0 # BTC göreceli güç eşiği (-8'den -10'a gevşetildi)
+RS_MIN          = -10.0 # BTC göreceli güç eşiği
 
 # ── Spam Koruması ───────────────────────────────────────────
 SPAM_PENCERE    = 300   # 5 dakika
@@ -332,26 +331,23 @@ def ls_yorum(ls: dict | None) -> str:
 # ══════════════════════════════════════════════════════════════
 async def sembolleri_cek(client: AsyncClient) -> list:
     """
-    Binance'deki aktif USDT çiftlerini çek.
-    24 saatlik hacim filtresi uygula — meme/ölü coinleri otomatik eleyelim.
-    Blacklist tek tek elle yazmaktan çok daha güvenilir.
+    Binance'deki TÜM aktif USDT çiftlerini çek.
+    Sadece belirlenen kara listeler uygulanır.
+    Kalite kontrolü K1/K2 filtrelerinde yapılır.
     """
     try:
-        # get_ticker() tüm sembollerin 24h verilerini döner
-        tum_tickerlar = await client.get_ticker()
-        semboller = []
-        for t in tum_tickerlar:
-            sym        = t["symbol"]
-            hacim_24h  = float(t.get("quoteVolume", 0))  # USD cinsinden 24h hacim
-            if (sym.endswith("USDT")
-                    and hacim_24h >= MIN_24H_HACIM          # Min $15M 24h hacim
-                    and sym not in STABLECOIN_LISTESI
-                    and sym not in MAJOR_LISTESI
-                    and sym not in OLU_LISTESI
-                    and sym not in EMTIA_LISTESI):
-                semboller.append(sym.lower())
-        print(f"[Sembol] {len(semboller)} coin hacim filtresini geçti "
-              f"(min ${MIN_24H_HACIM/1e6:.0f}M 24h)")
+        veri = await client.get_exchange_info()
+        semboller = [
+            s["symbol"].lower()
+            for s in veri.get("symbols", [])
+            if s["symbol"].endswith("USDT")
+            and s.get("status") == "TRADING"
+            and s["symbol"] not in STABLECOIN_LISTESI
+            and s["symbol"] not in MAJOR_LISTESI
+            and s["symbol"] not in OLU_LISTESI
+            and s["symbol"] not in EMTIA_LISTESI
+        ]
+        print(f"[Sembol] Toplam {len(semboller)} coin taranacak")
         return sorted(semboller)
     except Exception as e:
         print(f"[Sembol Hata] {e}")
