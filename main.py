@@ -53,7 +53,10 @@ OLU_LISTESI = {
     "SHIBUSDT", "PEPEUSDT", "1MBABYDOGEUSDT", "BABYDOGEUSDT",
     "MEMEUSDT", "PUMPUSDT",
     "HMSTRUSDT", "PIXELUSDT", "PLAYDIPUSDT",
-    "BINANCELIFEUSDT",
+    "HEMIUSDT",          # Düşük hacimli, manipülasyon riski
+    "BANANAS31USDT",     # Sürekli negatif RS, çok zayıf coin
+    # 币安人生 — olası semboller (hangisi olduğu bilinmiyor, ikisi de engelle)
+    "BINANCELIFEUSDT", "BIANRENSHENGUSDT", "RENSUSDT", "BNLIFEUSDT",
 }
 EMTIA_LISTESI = {
     "PAXGUSDT", "XAUTUSDT",
@@ -353,7 +356,11 @@ def katman1(sembol: str) -> dict | None:
     if len(f) >= 97:
         coin_24h = ((f[-1] - f[-97]) / f[-97]) * 100
         rs_degeri = coin_24h - BTC_24H
+        # BTC düşüşteyken: RS < -10% reddet
         if BTC_24H < -3.0 and rs_degeri < RS_MIN:
+            return None
+        # Her zaman: RS < -15% reddet (BANANAS31 gibi çok zayıf coinler)
+        if rs_degeri < -15.0:
             return None
 
     # Skor
