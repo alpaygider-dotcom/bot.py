@@ -84,7 +84,7 @@ K2_HACIM_MAX    = 50.0
 K2_TAKER_MIN    = 0.60    # Son mum taker buy
 K2_TAKER5_MIN   = 0.55    # 5 mum ortalama taker buy
 K2_TAKER_MAX    = 0.92
-K2_USD_MIN      = 15000
+K2_USD_MIN      = 50000  # $15K'dan $50K'ya — AVNT/SYRUP/CHZ tipi ince coinler elenir
 K2_5DK_MIN      = 0.08
 K2_5DK_MAX      = 3.0
 K2_15DK_MAX     = 2.0
@@ -110,6 +110,14 @@ RS_MIN          = -10.0   # BTC göreceli güç minimum eşiği
 SPAM_PENCERE    = 300
 SPAM_ESIK       = 5
 
+# ── Long Sinyali ────────────────────────────────────────────
+LS_TARAMA_SURE  = 600    # 10 dakikada bir tara
+LS_DUSUS_MIN    = 2.0    # Minimum long düşüşü (yüzde puan)
+LS_DUSUS_GEREK  = 3      # Kaç periyotta düşüş görülmeli
+LS_PUMP_LIMIT   = 5.0    # Son timeframe'lerde max artış % (pump koruması)
+LS_COOLDOWN     = 14400  # Aynı coin için 4 saat cooldown
+LS_MIN_LONG_PCT = 50.0   # Long oranı en az %50 olmalı (long ağırlıklı piyasa)
+
 # ══════════════════════════════════════════════════════════════
 # GLOBAL DEPOLAR
 # ══════════════════════════════════════════════════════════════
@@ -121,6 +129,7 @@ SON_SINYALLER = []
 WS_YENILE     = False
 BTC_RSI       = 50.0
 BTC_24H       = 0.0       # BTC 24 saatlik değişim %
+LS_SINYAL_ZAMANI = {}     # Long sinyali cooldown {sembol: timestamp}
 
 # ══════════════════════════════════════════════════════════════
 # TELEGRAM
@@ -268,6 +277,242 @@ def ls_yorum(ls: dict | None) -> str:
     return ""
 
 # ══════════════════════════════════════════════════════════════
+# LONG SİNYALİ — FUTURES L/S TAKİBİ
+# ══════════════════════════════════════════════════════════════
+
+async def futures_sembolleri_getir(spot_semboller: set) -> list:
+    """
+    Binance Futures'ta PERPETUAL olan VE spot listesinde bulunan sembolleri döner.
+    Yani Binance TR'deki coinlerin futures versiyonları.
+    """
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://fapi.binance.com/fapi/v1/exchangeInfo",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status != 200:
+                    return []
+                veri = await r.json()
+        futures_set = {
+            sym["symbol"]
+            for sym in veri.get("symbols", [])
+            if sym.get("status") == "TRADING"
+            and sym.get("contractType") == "PERPETUAL"
+            and sym["symbol"].endswith("USDT")
+        }
+        # Spot listesiyle kesişim (spot lowercase, futures uppercase)
+        kesisim = futures_set & {s.upper() for s in spot_semboller}
+        return sorted(kesisim)
+    except Exception as e:
+        print(f"[Futures Sembol Hata] {e}")
+        return []
+
+
+def pump_kontrol_spot(sembol: str) -> tuple:
+    """
+    Mevcut 15dk verisini kullanarak pump kontrolü (ekstra API çağrısı yok).
+    15dk mumlar: 1 ≈ 15dk, 2 ≈ 30dk, 4 = 1s, 8 = 2s, 24 = 6s, 48 = 12s
+    Döner: (pump_var, max_artis_pct)
+    """
+    anahtar = sembol.lower()
+    if anahtar not in STORE_15DK:
+        return False, 0.0
+    f = STORE_15DK[anahtar]["f"]
+    if len(f) < 5:
+        return False, 0.0
+    su_an = f[-1]
+    en_yuksek = 0.0
+    for n in [1, 2, 4, 8, 24, 48]:      # ~15dk, 30dk, 1s, 2s, 6s, 12s
+        if len(f) > n and f[-n-1] > 0:
+            degisim = (su_an - f[-n-1]) / f[-n-1] * 100
+            en_yuksek = max(en_yuksek, degisim)
+    return en_yuksek >= LS_PUMP_LIMIT, round(en_yuksek, 1)
+
+
+async def ls_cok_periyot_analiz(session: aiohttp.ClientSession, sembol: str) -> dict | None:
+    """
+    5m ve 1h periyotlarda L/S oranını çek ve analiz et.
+    5m (limit=7): 5dk, 10dk, 30dk kontrolü
+    1h (limit=13): 1s, 2s, 6s, 12s kontrolü
+    """
+    url  = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
+    veri = {}
+    for periyot, limit in [("5m", 7), ("1h", 13)]:
+        try:
+            p = {"symbol": sembol, "period": periyot, "limit": limit}
+            async with session.get(url, params=p, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    if len(d) >= 2:
+                        veri[periyot] = d
+        except Exception:
+            continue
+
+    if not veri:
+        return None
+
+    # Güncel L/S durumu
+    son = (veri.get("5m") or veri.get("1h"))[-1]
+    long_pct  = float(son.get("longAccount", 0.5)) * 100
+    short_pct = float(son.get("shortAccount", 0.5)) * 100
+
+    # Long oranı yeterliyse devam et
+    if long_pct < LS_MIN_LONG_PCT:
+        return None
+
+    dusus_sayisi = 0
+    dusus_detay  = {}
+
+    # 5m verisiyle kısa vade (5dk, 10dk, 30dk)
+    if "5m" in veri:
+        d = veri["5m"]
+        curr = float(d[-1]["longAccount"]) * 100
+        for etiket, n, esik in [
+            ("5dk",  1, LS_DUSUS_MIN * 0.5),
+            ("10dk", 2, LS_DUSUS_MIN * 0.75),
+            ("30dk", 6, LS_DUSUS_MIN * 1.25),
+        ]:
+            if len(d) > n:
+                prev = float(d[-n-1]["longAccount"]) * 100
+                degisim = curr - prev            # Negatif = long düşüyor
+                dusus_detay[etiket] = round(degisim, 2)
+                if degisim < -esik:
+                    dusus_sayisi += 1
+
+    # 1h verisiyle uzun vade (1s, 2s, 6s, 12s)
+    if "1h" in veri:
+        d = veri["1h"]
+        curr = float(d[-1]["longAccount"]) * 100
+        for etiket, n, esik in [
+            ("1s",  1,  LS_DUSUS_MIN * 1.5),
+            ("2s",  2,  LS_DUSUS_MIN * 2.0),
+            ("6s",  6,  LS_DUSUS_MIN * 2.5),
+            ("12s", 12, LS_DUSUS_MIN * 3.5),
+        ]:
+            if len(d) > n:
+                prev = float(d[-n-1]["longAccount"]) * 100
+                degisim = curr - prev
+                dusus_detay[etiket] = round(degisim, 2)
+                if degisim < -esik:
+                    dusus_sayisi += 1
+
+    return {
+        "sembol":       sembol,
+        "long_pct":     round(long_pct, 1),
+        "short_pct":    round(short_pct, 1),
+        "dusus_sayisi": dusus_sayisi,
+        "dusus_detay":  dusus_detay,
+    }
+
+
+async def long_sinyali_gonder(analiz: dict, pump_pct: float):
+    """Long düşüşü sinyal mesajı — ayrı sinyal tipi"""
+    sembol   = analiz["sembol"]
+    l_pct    = analiz["long_pct"]
+    s_pct    = analiz["short_pct"]
+    detay    = analiz["dusus_detay"]
+    sayi     = analiz["dusus_sayisi"]
+
+    # Düşüş gösteren periyotları formatla
+    satirlar = ""
+    for etiket in ["5dk", "10dk", "30dk", "1s", "2s", "6s", "12s"]:
+        if etiket in detay:
+            val = detay[etiket]
+            if val < -0.5:
+                emoji = "🔴" if val < -3 else "🟡"
+                satirlar += f"  {emoji} {etiket}: {val:+.1f} pp\n"
+
+    msg = (
+        f"<b>📉 LONG DÜŞÜŞÜ → YÜKSELİŞ SİNYALİ</b>\n"
+        f"<b>{sembol}</b>  ({sayi} periyot onayladı)\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>📊 Futures L/S Oranı:</b>\n"
+        f"  🟢 Long: <b>%{l_pct:.1f}</b>  |  🔴 Short: %{s_pct:.1f}\n"
+        f"\n"
+        f"<b>📉 Long Düşüşü (periyotlar):</b>\n"
+        f"{satirlar}"
+        f"\n"
+        f"<b>📌 Mantık:</b>\n"
+        f"Long'lar kapanıyor → Overleveraged pozisyonlar temizleniyor\n"
+        f"Temizlenme sonrası yükseliş ihtimali yüksek ↑\n"
+        f"\n"
+        f"Son max pump: +%{pump_pct:.1f} (limit: +%{LS_PUMP_LIMIT:.0f})\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ {tr_saat()} (TR)"
+    )
+
+    await telegram(msg)
+    print(f"📉 LONG SİNYALİ → {sembol} | Long: %{l_pct:.1f} | {sayi} periyot")
+
+
+async def long_sinyali_tarama(client: AsyncClient):
+    """
+    Her 10 dakikada çalışır.
+    Binance Futures'ta long oranı düşen coinleri tespit eder.
+    Sadece Binance TR'de olan coinler kontrol edilir.
+    Pump yapmamış coinlerde sinyal gönderilir.
+    """
+    global LS_SINYAL_ZAMANI
+
+    if not STORE_15DK:
+        return  # Spot veri henüz yüklenmemiş
+
+    # Futures ile spot kesişimini bul
+    spot_set = set(STORE_15DK.keys())   # lowercase: "avntusdt"
+    futures_semboller = await futures_sembolleri_getir(spot_set)
+
+    if not futures_semboller:
+        print("[Long Tarama] Futures sembol listesi boş")
+        return
+
+    print(f"[Long Tarama] {len(futures_semboller)} futures coini taranıyor | {tr_saat()}")
+
+    sinyaller = []
+    sem = asyncio.Semaphore(5)
+
+    async def tara(sembol: str):
+        async with sem:
+            await asyncio.sleep(0.1)  # Rate limit koruması
+
+            # Cooldown kontrolü
+            if time.time() - LS_SINYAL_ZAMANI.get(sembol, 0) < LS_COOLDOWN:
+                return
+
+            # Pump filtresi (mevcut 15dk veri kullanılır, ekstra API çağrısı yok)
+            pump_var, pump_pct = pump_kontrol_spot(sembol)
+            if pump_var:
+                return
+
+            # L/S oranı analizi
+            try:
+                async with aiohttp.ClientSession() as session:
+                    analiz = await ls_cok_periyot_analiz(session, sembol)
+            except Exception:
+                return
+
+            if not analiz:
+                return
+
+            if analiz["dusus_sayisi"] >= LS_DUSUS_GEREK:
+                sinyaller.append((sembol, analiz, pump_pct))
+
+    await asyncio.gather(*[tara(s) for s in futures_semboller])
+
+    # En çok periyotta düşüş gösterenleri önce gönder, max 3 sinyal
+    sinyaller.sort(key=lambda x: x[1]["dusus_sayisi"], reverse=True)
+
+    for sembol, analiz, pump_pct in sinyaller[:3]:
+        LS_SINYAL_ZAMANI[sembol] = time.time()
+        await long_sinyali_gonder(analiz, pump_pct)
+        await asyncio.sleep(2)  # Telegram flood koruması
+
+    if sinyaller:
+        print(f"[Long Tarama] {len(sinyaller)} sinyal bulundu, "
+              f"{min(len(sinyaller), 3)} gönderildi")
+
+
+# ══════════════════════════════════════════════════════════════
 # SEMBOL LİSTESİ — Tüm Binance coinleri
 # ══════════════════════════════════════════════════════════════
 async def sembolleri_cek(client: AsyncClient) -> list:
@@ -359,8 +604,8 @@ def katman1(sembol: str) -> dict | None:
         # BTC düşüşteyken: RS < -10% reddet
         if BTC_24H < -3.0 and rs_degeri < RS_MIN:
             return None
-        # Her zaman: RS < -15% reddet (BANANAS31 gibi çok zayıf coinler)
-        if rs_degeri < -15.0:
+        # Her zaman: RS < -12% reddet (币安人生 -12.7%, CHZ -10.3% tipi coinler)
+        if rs_degeri < -12.0:
             return None
 
     # Skor
@@ -693,6 +938,18 @@ async def bot():
                 except Exception as e:
                     print(f"[Tarama Hata] {e}")
         asyncio.create_task(arka_plan())
+
+        # ── Long sinyali arka plan görevi ────────────────────
+        async def arka_plan_long():
+            await asyncio.sleep(120)  # Spot veri yüklensin diye 2 dk bekle
+            while True:
+                try:
+                    await long_sinyali_tarama(client)
+                except Exception as e:
+                    print(f"[Long Tarama Hata] {e}")
+                await asyncio.sleep(LS_TARAMA_SURE)
+
+        asyncio.create_task(arka_plan_long())
 
         bm = BinanceSocketManager(client)
 
